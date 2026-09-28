@@ -20,7 +20,7 @@ Status: draft. Nothing here is audited. Changes to this file need the same care 
 ## 2. Secrets the user holds
 
 - **Master password (MP)** — chosen by user, never leaves the device.
-- **Secret Key (SK)** — 128 random bits generated at signup, stored on each device (Keychain), shown once in the Emergency Kit. Format: `LB1-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-X` (Crockford base32 + checksum char).
+- **Secret Key (SK)** — 128 random bits generated at signup, stored on each device (Keychain), shown once in the Emergency Kit. Format: `LB1-XXXXXX-XXXXX-XXXXX-XXXXX-XXXXX-C`: 26 Crockford base32 chars (first carries 3 bits, rest 5) + 1 SHA-256 checksum char to catch typos.
 - Losing both MP and SK (or the Emergency Kit) = data is unrecoverable. By design; no backdoor.
 
 ## 3. Key hierarchy
@@ -37,7 +37,7 @@ vault_key (random 256-bit per vault) ── encrypted with KEK
 item      ── encrypted with its vault_key
 ```
 
-- **Argon2id:** m = 256 MiB, t = 3, p = 4 by default; params + 16-byte random salt stored in the account header so they can be raised later.
+- **Argon2id:** m = 256 MiB, t = 3, p = 4 by default (~0.4 s on an M-series Mac); params + 16-byte random salt stored in the account header so they can be raised later.
 - MP is NFKD-normalised and trimmed before hashing.
 - XOR-combining means neither MP nor SK alone reduces the search space.
 

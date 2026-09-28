@@ -17,8 +17,8 @@ apps/desktop    Tauri 2 macOS app
 
 ## Roadmap
 
-- [ ] **M0** Security spec (this repo's SPEC.md)
-- [ ] **M1** Core: create/unlock account, vault + item CRUD, password generator, TOTP, known-answer tests
+- [x] **M0** Security spec (this repo's SPEC.md)
+- [x] **M1** Core: create/unlock account, vault + item CRUD, password generator, TOTP, known-answer tests
 - [ ] **M2** CLI: `init`, `unlock`, `add`, `get`, `ls`, `gen`, `totp`, `copy`
 - [ ] **M3** Desktop: unlock, ⌘K search, item detail, copy + clipboard clear, auto-lock, Touch ID, Quick Access
 - [ ] **M4** Import: 1Password `.1pux`, Chrome/Safari CSV, Bitwarden JSON
