@@ -48,6 +48,18 @@ pub struct Item {
 }
 
 impl Item {
+    /// password, username, url (first), notes, title, or a custom field by name.
+    pub fn field(&self, name: &str) -> Option<String> {
+        match name.to_lowercase().as_str() {
+            "password" => self.password.clone(),
+            "username" => self.username.clone(),
+            "url" => self.urls.first().cloned(),
+            "notes" => self.notes.clone(),
+            "title" => Some(self.title.clone()),
+            n => self.fields.iter().find(|f| f.name.eq_ignore_ascii_case(n)).map(|f| f.value.clone()),
+        }
+    }
+
     /// Case-insensitive substring match on title, username, urls and tags.
     pub fn matches(&self, query: &str) -> bool {
         let q = query.to_lowercase();

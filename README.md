@@ -6,6 +6,19 @@ A personal, end-to-end encrypted password manager in the spirit of 1Password. ma
 
 Security design: [SPEC.md](./SPEC.md)
 
+## Desktop app
+
+```sh
+cargo install tauri-cli --version '^2' --locked   # once
+cd apps/desktop/src-tauri && cargo tauri build --bundles app
+open ../../../target/release/bundle/macos/lockbox.app
+```
+
+- ⌘K search and actions · ⌘N new item · ⌘L lock · ⌘C copy password of the selected item · ↑↓ move through items
+- **Quick Access:** ⌘⇧Space from anywhere. ↵ copies the password, ⌥↵ the 2FA code, ⌘C the username.
+- Auto-locks after 10 idle minutes or when the Mac's screen locks. While unlocked, the app also serves the CLI, so `lockbox ls` works without a separate `lockbox unlock`.
+- `LOCKBOX_DIR=/some/dir` points the app or CLI at a different lockbox (handy for trying it out).
+
 ## CLI
 
 ```sh
@@ -31,7 +44,8 @@ lockbox lock
 crates/core     Rust: crypto, vault model, local store, generator, TOTP
 crates/cli      `lockbox` command-line client
 crates/server   sync server (axum + SQLite, single binary)
-apps/desktop    Tauri 2 macOS app
+apps/desktop    Tauri 2 macOS app (plain HTML/CSS/JS, no bundler)
+crates/platform macOS Keychain, concealed clipboard, unlock-agent socket (shared by CLI + app)
 ```
 
 ## Roadmap
@@ -39,7 +53,8 @@ apps/desktop    Tauri 2 macOS app
 - [x] **M0** Security spec (this repo's SPEC.md)
 - [x] **M1** Core: create/unlock account, vault + item CRUD, password generator, TOTP, known-answer tests
 - [x] **M2** CLI: `init`, `unlock`, `add`, `get`, `ls`, `gen`, `totp`, `copy`
-- [ ] **M3** Desktop: unlock, ⌘K search, item detail, copy + clipboard clear, auto-lock, Touch ID, Quick Access
+- [x] **M3** Desktop: unlock, ⌘K search, item detail + editor, generator, copy + clipboard clear, auto-lock (idle + screen lock), Quick Access
+- [ ] **M3.1** Touch ID unlock (needs a signed build, see SPEC §6)
 - [ ] **M4** Import: 1Password `.1pux`, Chrome/Safari CSV, Bitwarden JSON
 - [ ] **M5** Sync server + multi-device
 - [ ] **M6** Watchtower: breached (HIBP k-anonymity), weak, reused, missing 2FA
