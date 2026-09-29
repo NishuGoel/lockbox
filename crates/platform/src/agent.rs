@@ -23,6 +23,7 @@ pub enum Request {
     Add { vault: Uuid, item: Item },
     Update { id: Uuid, item: Item },
     Delete { id: Uuid },
+    Import { items: Vec<lockbox_core::import::Imported>, vault: Option<Uuid> },
     Lock,
 }
 
@@ -36,6 +37,7 @@ pub fn handle(lb: &Lockbox, req: Request) -> Response {
         Request::Add { vault, item } => lb.add_item(&vault, item).map(|v| json!(v)),
         Request::Update { id, item } => lb.update_item(&id, item).map(|_| Value::Null),
         Request::Delete { id } => lb.delete_item(&id).map(|_| Value::Null),
+        Request::Import { items, vault } => lb.import(items, vault.as_ref()).map(|v| json!(v)),
         Request::Lock => Ok(Value::Null),
     };
     r.map_err(|e| e.to_string())

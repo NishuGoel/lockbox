@@ -18,6 +18,7 @@ const ICONS = {
   refresh: 'M20 11a8 8 0 0 0-14.9-3M4 4v4h4M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4',
   trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13',
   edit: 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4',
+  download: 'M12 4v11M7 10l5 5 5-5M5 20h14',
   key: 'M14 10a4 4 0 1 0-3.5 4L9 16H7v2H5v2H3v-3l6.5-6.5A4 4 0 0 0 14 10zM15.5 8.5v.01',
 };
 

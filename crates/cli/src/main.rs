@@ -8,7 +8,7 @@ use lockbox_platform::agent::{self, Request};
 use lockbox_platform::mac;
 use clap::{Parser, Subcommand};
 use lockbox_core::generator::{self, PasswordOpts};
-use lockbox_core::{Item, ItemRecord, KdfParams, Kind, Lockbox, SecretKey, Vault, totp};
+use lockbox_core::{ImportSummary, Item, ItemRecord, KdfParams, Kind, Lockbox, SecretKey, Vault, import, totp};
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -94,6 +94,16 @@ enum Cmd {
         query: String,
         #[arg(short, long)]
         yes: bool,
+    },
+    /// Import a 1Password .1pux, or a CSV from Chrome, Safari, Firefox or Bitwarden
+    Import {
+        file: PathBuf,
+        /// only import these 1Password vaults, e.g. --from-vault Employee
+        #[arg(long = "from-vault")]
+        from_vault: Vec<String>,
+        /// put everything into this lockbox vault (default: same-named vaults, else Personal)
+        #[arg(long)]
+        vault: Option<String>,
     },
     /// Generate a password or PIN
     Gen {
@@ -394,6 +404,36 @@ fn run(cmd: Cmd) -> R<()> {
                 None => generator::password(PasswordOpts { length, symbols: !no_symbols, avoid_ambiguous: easy_type, ..Default::default() })?,
             };
             if c { copy(&pw, "generated password")? } else { println!("{pw}") }
+        }
+        Cmd::Import { file, from_vault, vault } => {
+            let mut parsed = import::parse_file(&file)?;
+            let found = parsed.vaults();
+            if !found.is_empty() {
+                let list: Vec<String> = found.iter().map(|(n, c)| format!("{n} ({c})")).collect();
+                println!("Vaults in this export: {}", list.join(", "));
+            }
+            if !from_vault.is_empty() {
+                for want in &from_vault {
+                    if !found.iter().any(|(n, _)| n.eq_ignore_ascii_case(want)) {
+                        return Err(format!("no vault named '{want}' in this export").into());
+                    }
+                }
+                parsed = parsed.only_vaults(&from_vault);
+            }
+            let s = Session::open(&p)?;
+            let target = vault.map(|n| s.vault(Some(&n))).transpose()?;
+            let sum: ImportSummary = s.call(Request::Import { items: parsed.items, vault: target.as_ref().map(|v| v.id) })?;
+            println!("Imported {} item{}{}.", sum.added, if sum.added == 1 { "" } else { "s" }, target.map(|v| format!(" into {}", v.name)).unwrap_or_default());
+            if !sum.vaults_created.is_empty() {
+                println!("Created vaults: {}", sum.vaults_created.join(", "));
+            }
+            if sum.duplicates > 0 {
+                println!("Skipped {} duplicates already in lockbox.", sum.duplicates);
+            }
+            for reason in &parsed.skipped {
+                println!("Skipped {reason}");
+            }
+            println!("\nThe export file holds your passwords in plain text. Delete it now:\n  rm {:?}", file);
         }
         cmd => {
             let s = Session::open(&p)?;
