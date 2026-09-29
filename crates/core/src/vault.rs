@@ -47,7 +47,19 @@ pub struct Item {
     pub updated_at: u64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+impl Item {
+    /// Case-insensitive substring match on title, username, urls and tags.
+    pub fn matches(&self, query: &str) -> bool {
+        let q = query.to_lowercase();
+        let hit = |s: &str| s.to_lowercase().contains(&q);
+        hit(&self.title)
+            || self.username.as_deref().is_some_and(hit)
+            || self.urls.iter().any(|u| hit(u))
+            || self.tags.iter().any(|t| hit(t))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ItemRecord {
     pub id: Uuid,
     pub vault_id: Uuid,
@@ -55,7 +67,7 @@ pub struct ItemRecord {
     pub item: Item,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vault {
     pub id: Uuid,
     pub name: String,
@@ -261,19 +273,7 @@ impl Lockbox {
 
     // ponytail: linear scan over decrypted items; fine to ~10k items, add an in-memory index if search lags.
     pub fn search(&self, query: &str) -> Result<Vec<ItemRecord>> {
-        let q = query.to_lowercase();
-        let hit = |s: &str| s.to_lowercase().contains(&q);
-        Ok(self
-            .items(None)?
-            .into_iter()
-            .filter(|r| {
-                let i = &r.item;
-                hit(&i.title)
-                    || i.username.as_deref().is_some_and(hit)
-                    || i.urls.iter().any(|u| hit(u))
-                    || i.tags.iter().any(|t| hit(t))
-            })
-            .collect())
+        Ok(self.items(None)?.into_iter().filter(|r| r.item.matches(query)).collect())
     }
 }
 

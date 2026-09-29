@@ -57,11 +57,11 @@ item      ── encrypted with its vault_key
 
 ## 6. Local device
 
-- SK is kept in the macOS Keychain (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`).
+- SK is kept in the macOS Keychain (one entry per lockbox file). The CLI uses the login keychain; `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` + biometric ACLs need the data-protection keychain, which requires a signed app with entitlements (M3).
 - **Touch ID unlock:** AUK is wrapped by a Secure Enclave key with `biometryCurrentSet` access control. Enrolling a new fingerprint invalidates it, so the user has to enter MP again.
 - **Auto-lock** on idle (default 10 min), sleep, screen lock, and quit. Keys live in `zeroize`-on-drop buffers.
 - **Clipboard:** copied secrets are marked `org.nspasteboard.ConcealedType` (clipboard managers skip them) and cleared after 90 s if the value is unchanged.
-- The CLI unlock session is held by the desktop app over a Unix socket (`0600`, peer UID checked). The CLI never writes keys to disk.
+- The unlock session is held by an agent process over a Unix socket (`0600` in a `0700` dir, peer UID checked via `getpeereid`), one JSON request per connection, exiting after an idle timeout. `lockbox unlock` starts it today; the desktop app hosts the same protocol in M3. The master password reaches the agent over a pipe, never argv/env. Keys are never written to disk.
 
 ## 7. Sync
 

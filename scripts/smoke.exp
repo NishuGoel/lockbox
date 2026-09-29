@@ -1,0 +1,43 @@
+#!/usr/bin/expect -f
+# End-to-end CLI check. Run after `cargo build --release`.
+# Side effects: writes /tmp/lbs, a throwaway Keychain entry, and your clipboard (restore it yourself).
+# Cleanup: rm -rf /tmp/lbs; security delete-generic-password -s lockbox.secret-key -a /tmp/lbs/lockbox.db
+set timeout 15
+set lb [file normalize [file dirname [info script]]/../target/release/lockbox]
+exec rm -rf /tmp/lbs
+set env(LOCKBOX_DIR) /tmp/lbs
+proc run {args} { global lb spawn_id; eval spawn $lb $args }
+proc say {prompt text} { expect $prompt; sleep 0.25; send "$text\r" }
+proc pw {p} { say "Master password: " $p }
+
+run init
+say "Choose a master password: " "correct horse battery"
+say "Repeat it: " "correct horse battery"
+expect -re {Secret Key:  (LB1-[0-9A-Z-]+)}; set sk $expect_out(1,string); puts "\n>> SK $sk"
+expect eof
+
+run status; expect "locked"; expect eof
+run add GitHub -u me@example.com --url https://github.com --totp GEZDGNBVGY3TQOJQ --tag dev
+pw "correct horse battery"
+say "Password (leave empty to generate): " "hunter2hunter2"
+expect "Added GitHub to Personal."; expect eof
+
+run ls; pw "nope nope nope"; expect "wrong master password or Secret Key"; expect eof
+
+run unlock --minutes 1; pw "correct horse battery"; expect "Unlocked."; expect eof
+run status; expect "unlocked"; expect eof
+run ls; expect -re {GitHub +me@example.com +Personal}; expect eof
+run get github -f password; expect "hunter2hunter2"; expect eof
+run get github; expect -re {totp +[0-9]{3} [0-9]{3}}; expect eof
+run vaults add Work; expect "Created vault Work."; expect eof
+run add AWS --vault work --generate -u root; expect "Added AWS to Work."; expect eof
+run ls --vault Work; expect -re {AWS +root +Work}; expect eof
+run get aws -f password; expect -re {\S{24}}; expect eof
+run copy github; expect "Copied password for GitHub"; expect eof
+set clip [exec pbpaste]; if {$clip ne "hunter2hunter2"} { puts ">> CLIPBOARD WRONG: $clip"; exit 1 }
+run rm aws; say "Delete AWS?" "y"; expect "Deleted AWS."; expect eof
+run get aws; expect "nothing matches 'aws'"; expect eof
+run gen --pin 6; expect -re {\d{6}}; expect eof
+run lock; expect "Locked."; expect eof
+run status; expect -re {state +locked}; expect eof
+puts "\n>> SMOKE OK"

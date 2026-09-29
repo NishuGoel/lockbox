@@ -1,0 +1,23 @@
+[package]
+name = "lockbox-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+libc = "0.2.189"
+lockbox-core = { version = "0.1.0", path = "../core" }
+rpassword = "7.5.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+uuid = "1.26.1"
+zeroize = "1.9.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", features = ["NSPasteboard"] }
+objc2-foundation = "0.3.2"
+security-framework = "3.7.0"
+
+[[bin]]
+name = "lockbox"
+path = "src/main.rs"
