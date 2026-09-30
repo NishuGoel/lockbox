@@ -241,6 +241,16 @@ struct ItemView {
     has_totp: bool,
     fields: Vec<(String, Option<String>)>,
     updated_at: u64,
+    passkey: Option<PasskeyView>,
+    history_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PasskeyView {
+    rp_id: String,
+    user_name: String,
+    created_at: u64,
 }
 
 #[tauri::command]
@@ -264,6 +274,8 @@ fn items(s: S) -> Res<Vec<ItemView>> {
                 tags: i.tags,
                 favorite: i.favorite,
                 updated_at: i.updated_at,
+                passkey: i.passkey.map(|p| PasskeyView { rp_id: p.rp_id, user_name: p.user_name, created_at: p.created_at }),
+                history_count: i.password_history.len(),
             }
         })
         .collect())

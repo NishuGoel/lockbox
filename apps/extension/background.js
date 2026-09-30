@@ -110,6 +110,31 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         await setOffer(tabId, null);
         return reply({ done: true, result: r });
       }
+      // ---- passkeys (from content scripts; the page URL is the browser's sender.url, never the page's word) ----
+      case 'pk-pre': {
+        if (sender.frameId !== 0) return reply({ fallback: true });
+        if (msg.kind === 'create') {
+          const st = await native({ cmd: 'status' });
+          if (st.error === 'no_connector' || st.state === 'no_vault') return reply({ fallback: true });
+          return reply(st.state === 'unlocked' ? { ok: true } : { locked: true });
+        }
+        const r = await native({ cmd: 'pk_list', url: sender.url, rpId: msg.data.rpId, allow: msg.data.allow });
+        if (r.error === 'locked') return reply({ locked: true });
+        if (r.error) return reply({ fallback: true });
+        // nothing in lockbox for this site: let the browser offer iCloud/phone/security key
+        return reply(r.items.length ? { items: r.items } : { fallback: true });
+      }
+      case 'pk-create': {
+        if (sender.frameId !== 0) return reply({ error: 'NotAllowedError: passkeys in embedded frames go to the browser' });
+        const d = msg.data;
+        const r = await native({ cmd: 'pk_create', url: sender.url, rpId: d.rpId, rpName: d.rpName, userId: d.userId, userName: d.userName, displayName: d.displayName, challenge: d.challenge, algs: d.algs, exclude: d.exclude });
+        return reply(r.error === 'locked' ? { error: 'lockbox is locked. Unlock it and try again.' } : r);
+      }
+      case 'pk-get': {
+        if (sender.frameId !== 0) return reply({ error: 'NotAllowedError' });
+        const d = msg.data;
+        return reply(await native({ cmd: 'pk_get', url: sender.url, id: d.id, rpId: d.rpId, challenge: d.challenge }));
+      }
       // ---- from the popup ----
       case 'popup': {
         const tab = await activeTab();

@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Passkey test RP</title></head>
+<body style="font-family:system-ui;padding:40px">
+<h1>Passkey test site</h1>
+<button id="reg">Create passkey</button> <button id="login">Sign in with passkey</button> <button id="reg2">Create (with timeout)</button>
+<pre id="out"></pre>
+<script>
+// A tiny relying party: verifies what lockbox returns the way a server would (WebCrypto, P-256).
+const out = (s) => (document.getElementById('out').textContent = s);
+const rnd = () => crypto.getRandomValues(new Uint8Array(32));
+const b64 = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+function der2raw(der) { // SEQUENCE { INTEGER r, INTEGER s } -> r||s (32 bytes each)
+  let i = 2; const read = () => { i++; const len = der[i++]; let v = der.slice(i, i + len); i += len; while (v.length > 32 && v[0] === 0) v = v.slice(1); const p = new Uint8Array(32); p.set(v, 32 - v.length); return p; };
+  return new Uint8Array([...read(), ...read()]);
+}
+let pub;
+async function register(extra = {}) {
+  const ch = rnd();
+  const c = await navigator.credentials.create({ publicKey: { rp: { id: 'localhost', name: 'Local Test' }, user: { id: new TextEncoder().encode('user-1'), name: 'nishu@test', displayName: 'Nishu' },
+    challenge: ch, pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }], authenticatorSelection: { residentKey: 'required' }, extensions: { credProps: true }, ...extra } });
+  const cd = JSON.parse(new TextDecoder().decode(c.response.clientDataJSON));
+  pub = await crypto.subtle.importKey('spki', c.response.getPublicKey(), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+  return { type: cd.type, origin: cd.origin, challengeOk: cd.challenge === b64(ch), alg: c.response.getPublicKeyAlgorithm(), isPKC: c instanceof PublicKeyCredential, rk: c.getClientExtensionResults().credProps?.rk, json: typeof c.toJSON().response.attestationObject };
+}
+document.getElementById('reg').onclick = async () => { try { out('registered ' + JSON.stringify(await register())); } catch (e) { out('reg error ' + e.name + ': ' + e.message); } };
+document.getElementById('reg2').onclick = async () => { try { out('registered ' + JSON.stringify(await register({ timeout: 1500 }))); } catch (e) { out('reg error ' + e.name); } };
+document.getElementById('login').onclick = async () => { try {
+  const ch = rnd();
+  const a = await navigator.credentials.get({ publicKey: { rpId: 'localhost', challenge: ch, allowCredentials: [] } });
+  const ad = a.response.authenticatorData, cdj = a.response.clientDataJSON;
+  const data = new Uint8Array([...new Uint8Array(ad), ...new Uint8Array(await crypto.subtle.digest('SHA-256', cdj))]);
+  const verified = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, der2raw(new Uint8Array(a.response.signature)), data);
+  const cd = JSON.parse(new TextDecoder().decode(cdj));
+  out('login ' + JSON.stringify({ verified, type: cd.type, challengeOk: cd.challenge === b64(ch), user: new TextDecoder().decode(a.response.userHandle) }));
+} catch (e) { out('login error ' + e.name + ': ' + e.message); } };
+</script></body></html>
