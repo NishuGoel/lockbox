@@ -36,6 +36,9 @@ lockbox edit github --generate      # rotate password
 lockbox gen -l 32 --copy            # or --pin 6, --no-symbols, --easy-type
 lockbox vaults add Work
 lockbox import 1Password.1pux --from-vault Employee   # or a Chrome/Safari CSV
+lockbox backup                      # encrypted copy (the app does this daily)
+lockbox export ~/Desktop/all.csv    # plaintext, asks for your master password
+lockbox restore <file.lockbox>
 lockbox lock
 ```
 
@@ -57,6 +60,8 @@ crates/platform macOS Keychain, concealed clipboard, unlock-agent socket (shared
 - [x] **M3** Desktop: unlock, ⌘K search, item detail + editor, generator, copy + clipboard clear, auto-lock (idle + screen lock), Quick Access
 - [ ] **M3.1** Touch ID unlock (needs a signed build, see SPEC §6)
 - [x] **M4** Import: 1Password `.1pux` (pick vaults, e.g. just Employee), Chrome/Safari/Firefox/Bitwarden CSV
-- [ ] **M5** Sync server + multi-device
-- [ ] **M6** Watchtower: breached (HIBP k-anonymity), weak, reused, missing 2FA
-- [ ] **M7** SSH agent, `.env` secret references, share links, passkeys
+- [x] **M4.5** Safety net: daily encrypted backups (iCloud Drive), restore, CSV export, monthly Emergency Kit check
+- [ ] **M5** Autofill extension for Chromium browsers (Dia, Chrome, Arc)
+- [ ] **M6** Sync server + iPhone app with AutoFill (needs Apple Developer Program)
+- [ ] **M7** Watchtower: breached (HIBP k-anonymity), weak, reused, missing 2FA, one-click change via /.well-known/change-password
+- [ ] **M8** Passkeys (Credential Exchange), Touch ID, SSH agent, share links

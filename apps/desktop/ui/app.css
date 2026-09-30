@@ -82,7 +82,10 @@ textarea.input{height:88px;padding:10px 14px;resize:vertical}
 .tag{height:26px;padding:0 10px;border-radius:13px;border:1px solid var(--line-2);color:var(--text-2);font-size:12px}
 .tag.on{border-color:var(--accent);color:var(--text)}
 .side-foot{margin-top:auto;display:flex;align-items:center;gap:8px;padding:10px;border-radius:10px;background:rgba(255,255,255,0.03);color:var(--text-3);font-size:12px}
-.side-foot i{width:7px;height:7px;border-radius:50%;background:var(--accent)}
+.side-foot{text-align:left;width:100%}
+.side-foot:hover{background:rgba(255,255,255,0.06)}
+.side-foot i{width:7px;height:7px;flex-shrink:0;border-radius:50%;background:var(--accent)}
+.side-foot.warn i{background:var(--danger)}
 
 .list{display:flex;flex-direction:column;border-right:1px solid var(--line);min-height:0}
 .list-head{padding:18px 20px 10px;display:flex;align-items:baseline;justify-content:space-between}
@@ -195,3 +198,17 @@ body.quick #root::before{display:none}
 .callout svg{color:var(--danger);flex-shrink:0}
 .callout p{flex:1}
 .stats{display:flex;flex-direction:column;gap:4px;color:var(--text-2)}
+
+/* settings */
+.sec{padding:20px 22px;border-radius:18px;background:rgba(255,255,255,0.03);border:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
+.sec h2{font-size:18px;letter-spacing:-0.01em}
+.sec-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sec-row .grow{flex:1;min-width:200px}
+.path{font-family:var(--mono);font-size:13px;color:var(--text-2);overflow-wrap:anywhere}
+.toggle{display:flex;align-items:center;gap:10px;font-weight:500}
+.toggle input{width:16px;height:16px;accent-color:var(--accent)}
+.faq{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}
+.faq div{padding:12px 14px;border-radius:12px;background:rgba(255,255,255,0.025);color:var(--text-2);font-size:13px}
+.faq b{display:block;color:var(--text);font-size:14px;margin-bottom:2px}
+.link{color:var(--accent);text-decoration:underline;text-underline-offset:3px;align-self:center;font-size:13px}
+.warn-text{color:#FDBA74}

@@ -5,6 +5,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use lockbox_platform::agent::{self, Request};
+use lockbox_platform::backup::{self, Settings};
 use lockbox_platform::mac;
 use clap::{Parser, Subcommand};
 use lockbox_core::generator::{self, PasswordOpts};
@@ -105,6 +106,12 @@ enum Cmd {
         #[arg(long)]
         vault: Option<String>,
     },
+    /// Save an encrypted backup (default: the app's backup folder, iCloud Drive if on)
+    Backup { dir: Option<PathBuf> },
+    /// Replace this vault with a backup; the current vault is kept aside
+    Restore { file: PathBuf },
+    /// Export every item as a plaintext CSV (Safari/Passwords layout)
+    Export { file: PathBuf },
     /// Generate a password or PIN
     Gen {
         #[arg(short, long, default_value_t = 24)]
@@ -404,6 +411,40 @@ fn run(cmd: Cmd) -> R<()> {
                 None => generator::password(PasswordOpts { length, symbols: !no_symbols, avoid_ambiguous: easy_type, ..Default::default() })?,
             };
             if c { copy(&pw, "generated password")? } else { println!("{pw}") }
+        }
+        Cmd::Backup { dir } => {
+            let data = lockbox_platform::data_dir()?;
+            let mut st = Settings::load(&data);
+            let dir = dir.or(st.backup_dir.clone()).unwrap_or_else(backup::default_dir);
+            let path = backup::backup_now(&p.db, &dir)?;
+            st.last_backup = backup::now();
+            st.save(&data)?;
+            println!("Backed up to {}", path.display());
+        }
+        Cmd::Restore { file } => {
+            if agent::is_running(&p.sock) {
+                agent::call(&p.sock, &Request::Lock)?;
+            }
+            let sk = match mac::load_secret_key(&p.account())? {
+                Some(k) => SecretKey::parse(&k)?,
+                None => SecretKey::parse(&prompt_hidden("Secret Key (from your Emergency Kit): ")?)?,
+            };
+            let pw = prompt_hidden("Master password for that backup: ")?;
+            backup::restore(&file, &p.db, &pw, &sk)?;
+            mac::save_secret_key(&p.account(), &sk.to_display())?;
+            println!("Restored {}. The previous vault was kept next to it as lockbox.db.before-restore-*.", file.display());
+        }
+        Cmd::Export { file } => {
+            if file.exists() {
+                return Err(format!("{} already exists", file.display()).into());
+            }
+            // always asks for the master password, even while the agent is unlocked
+            let (lb, _, _) = unlock_interactive(&p)?;
+            let csv = lb.export_csv()?;
+            std::fs::write(&file, csv.as_bytes())?;
+            std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+            println!("Exported {} items to {}.", lb.items(None)?.len(), file.display());
+            println!("It's plain text: anyone with the file can read every password. Delete it when you're done.");
         }
         Cmd::Import { file, from_vault, vault } => {
             let mut parsed = import::parse_file(&file)?;

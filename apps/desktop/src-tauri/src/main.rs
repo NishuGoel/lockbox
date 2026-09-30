@@ -7,6 +7,7 @@ use lockbox_core::generator::{self, PasswordOpts};
 use lockbox_core::import::{self, Parsed};
 use lockbox_core::{ImportSummary, Item, KdfParams, Kind, Lockbox, SecretKey, Vault, totp};
 use lockbox_platform::agent::{self, Request};
+use lockbox_platform::backup::{self, Settings};
 use lockbox_platform::mac;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,6 +32,7 @@ fn now() -> u64 {
 
 struct Shared {
     lb: Mutex<Option<Lockbox>>,
+    dir: PathBuf,
     db: PathBuf,
     sock: PathBuf,
     last: AtomicU64,
@@ -44,6 +46,34 @@ type S<'a> = State<'a, Arc<Shared>>;
 impl Shared {
     fn account(&self) -> String {
         self.db.to_string_lossy().into_owned()
+    }
+
+    /// Proves the person at the keyboard knows the master password (for export / reveal Secret Key).
+    fn reauth(&self, password: &str) -> Res<SecretKey> {
+        let sk = SecretKey::parse(&mac::load_secret_key(&self.account())?.ok_or("no Secret Key on this Mac")?).map_err(err)?;
+        Lockbox::unlock(&self.db, password, &sk).map_err(|_| "That master password isn't right.".to_string())?;
+        Ok(sk)
+    }
+
+    fn settings(&self) -> Settings {
+        Settings::load(&self.dir)
+    }
+
+    fn update(&self, f: impl FnOnce(&mut Settings)) -> Res<Settings> {
+        let mut st = self.settings();
+        f(&mut st);
+        st.save(&self.dir).map_err(err)?;
+        Ok(st)
+    }
+
+    fn backup(&self) -> Res<PathBuf> {
+        let dir = self.settings().backup_dir.unwrap_or_else(backup::default_dir);
+        let r = backup::backup_now(&self.db, &dir).map_err(err);
+        self.update(|st| match &r {
+            Ok(_) => (st.last_backup, st.last_backup_error) = (backup::now(), None),
+            Err(e) => st.last_backup_error = Some(e.clone()),
+        })?;
+        r
     }
 
     fn touch(&self) {
@@ -154,6 +184,7 @@ async fn create(app: AppHandle, s: S<'_>, password: String) -> Res<String> {
     mac::save_secret_key(&s.account(), &sk.to_display())?;
     *s.lb.lock().unwrap() = Some(lb);
     s.touch();
+    s.update(|st| st.last_recovery_check = backup::now())?;
     start_hosting(&app, s.inner());
     Ok(sk.to_display())
 }
@@ -396,6 +427,116 @@ fn delete_import_file(s: S) -> Res<()> {
     std::fs::remove_file(&path).map_err(err)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsView {
+    #[serde(flatten)]
+    settings: Settings,
+    backup_dir_shown: String,
+    icloud: bool,
+    recovery_due: bool,
+}
+
+#[tauri::command]
+fn settings_get(s: S) -> SettingsView {
+    let st = s.settings();
+    let dir = st.backup_dir.clone().unwrap_or_else(backup::default_dir);
+    let home = std::env::home_dir().unwrap_or_default();
+    let shown = dir.to_string_lossy().replace(&*home.join("Library/Mobile Documents/com~apple~CloudDocs").to_string_lossy(), "iCloud Drive").replace(&*home.to_string_lossy(), "~");
+    SettingsView { recovery_due: st.recovery_due(), icloud: shown.starts_with("iCloud Drive"), backup_dir_shown: shown, settings: st }
+}
+
+#[tauri::command]
+fn backup_set(s: S, auto: bool) -> Res<()> {
+    let st = s.update(|st| (st.auto_backup, st.backup_asked) = (auto, true))?;
+    if st.backup_due() {
+        s.backup()?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn backup_choose_dir(app: AppHandle, s: S<'_>) -> Res<bool> {
+    let Some(picked) = app.dialog().file().set_title("Choose where to keep backups").blocking_pick_folder() else { return Ok(false) };
+    let dir = picked.into_path().map_err(err)?;
+    s.update(|st| st.backup_dir = Some(dir))?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn backup_run(s: S) -> Res<String> {
+    s.backup().map(|p| p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()))
+}
+
+/// Monthly check that the user still has their Emergency Kit.
+#[tauri::command]
+fn recovery_verify(s: S, secret_key: String) -> Res<bool> {
+    let entered = SecretKey::parse(&secret_key).map_err(|_| "That doesn't look like a Secret Key. Check for typos.")?;
+    let stored = SecretKey::parse(&mac::load_secret_key(&s.account())?.ok_or("no Secret Key on this Mac")?).map_err(err)?;
+    let ok = *entered.0 == *stored.0;
+    if ok {
+        s.update(|st| st.last_recovery_check = backup::now())?;
+    }
+    Ok(ok)
+}
+
+#[tauri::command]
+fn recovery_snooze(s: S) -> Res<()> {
+    s.update(|st| st.last_recovery_check = backup::now().saturating_sub(backup::RECOVERY_CHECK_EVERY - 7 * backup::DAY)).map(drop)
+}
+
+#[tauri::command]
+async fn reveal_secret_key(s: S<'_>, password: String) -> Res<String> {
+    let sk = s.reauth(&Zeroizing::new(password))?;
+    Ok(sk.to_display())
+}
+
+#[tauri::command]
+async fn export_csv(app: AppHandle, s: S<'_>, password: String) -> Res<Option<String>> {
+    s.reauth(&Zeroizing::new(password))?;
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_title("Export passwords (plain text)")
+        .set_file_name("lockbox-export.csv")
+        .add_filter("CSV", &["csv"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(err)?;
+    let csv = s.with(|lb| lb.export_csv())?;
+    std::fs::write(&path, csv.as_bytes()).map_err(err)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+async fn restore_pick(app: AppHandle) -> Res<Option<String>> {
+    let picked = app.dialog().file().set_title("Choose a lockbox backup").add_filter("lockbox backup", &["lockbox", "db"]).blocking_pick_file();
+    picked.map(|p| p.into_path().map(|p| p.to_string_lossy().into_owned()).map_err(err)).transpose()
+}
+
+/// Replaces this Mac's vault with a backup (the current one is kept aside), then unlocks it.
+#[tauri::command]
+async fn restore(app: AppHandle, s: S<'_>, path: String, password: String, secret_key: Option<String>) -> Res<()> {
+    let pw = Zeroizing::new(password);
+    let sk = match secret_key.as_deref().filter(|k| !k.trim().is_empty()) {
+        Some(k) => SecretKey::parse(k).map_err(err)?,
+        None => SecretKey::parse(&mac::load_secret_key(&s.account())?.ok_or("need_secret_key")?).map_err(err)?,
+    };
+    s.lock(&app);
+    backup::restore(std::path::Path::new(&path), &s.db, &pw, &sk).map_err(err)?;
+    mac::save_secret_key(&s.account(), &sk.to_display())?;
+    *s.lb.lock().unwrap() = Some(Lockbox::unlock(&s.db, &pw, &sk).map_err(err)?);
+    s.touch();
+    start_hosting(&app, s.inner());
+    Ok(())
+}
+
 #[tauri::command]
 fn hide_quick(app: AppHandle) {
     if let Some(w) = app.get_webview_window("quick") {
@@ -433,6 +574,7 @@ fn main() {
     let shared = Arc::new(Shared {
         lb: Mutex::new(None),
         db: dir.join("lockbox.db"),
+        dir: dir.clone(),
         sock: dir.join("agent.sock"),
         last: AtomicU64::new(now()),
         hosting: AtomicBool::new(false),
@@ -456,10 +598,18 @@ fn main() {
         .manage(shared.clone())
         .setup(move |app| {
             let (app, sh) = (app.handle().clone(), shared);
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(2));
-                if sh.unlocked() && (now() - sh.last.load(Ordering::Relaxed) > IDLE_SECS || screen_locked()) {
-                    sh.lock(&app);
+            std::thread::spawn(move || {
+                let mut tick = 0u64;
+                loop {
+                    tick += 1;
+                    if sh.unlocked() && (now() - sh.last.load(Ordering::Relaxed) > IDLE_SECS || screen_locked()) {
+                        sh.lock(&app);
+                    }
+                    // backups need no keys (the file is already encrypted), so they run while locked too
+                    if tick % 60 == 1 && sh.db.exists() && sh.settings().backup_due() {
+                        let _ = sh.backup();
+                    }
+                    std::thread::sleep(Duration::from_secs(2));
                 }
             });
             Ok(())
@@ -476,7 +626,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             status, create, unlock, lock, activity, vaults, items, get_item, reveal, totp_code, copy, copy_text, generate,
-            save_item, delete_item, import_pick, import_run, delete_import_file, hide_quick, open_main
+            save_item, delete_item, import_pick, import_run, delete_import_file, settings_get, backup_set, backup_choose_dir, backup_run,
+            recovery_verify, recovery_snooze, reveal_secret_key, export_csv, restore_pick, restore, hide_quick, open_main
         ])
         .build(tauri::generate_context!())
         .expect("tauri app");

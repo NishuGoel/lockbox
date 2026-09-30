@@ -158,7 +158,57 @@ fn read_header(db: &Connection) -> Result<Option<Header>> {
     Ok(raw.map(|r| serde_json::from_slice(&r)).transpose()?)
 }
 
+/// Consistent snapshot of a lockbox file (`VACUUM INTO`). Needs no keys: the copy is exactly as
+/// encrypted as the original and opens with the same master password + Secret Key.
+pub fn backup_file(db: &Path, dest: &Path) -> Result<()> {
+    if !db.exists() {
+        return Err(Error::NotInitialized);
+    }
+    if dest.exists() {
+        return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "backup file already exists")));
+    }
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.execute("VACUUM INTO ?1", [dest.to_string_lossy()])?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn otpauth(title: &str, totp: &str) -> String {
+    if totp.starts_with("otpauth://") {
+        return totp.to_string();
+    }
+    let label: String = title.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    format!("otpauth://totp/{label}?secret={}", totp.replace(' ', "").to_uppercase())
+}
+
 impl Lockbox {
+    /// Plaintext CSV in the Safari/Passwords layout (Title,URL,Username,Password,Notes,OTPAuth), which
+    /// Apple Passwords, Chrome, Bitwarden, 1Password and lockbox itself can import. Custom fields are
+    /// appended to the notes so nothing is dropped.
+    pub fn export_csv(&self) -> Result<Zeroizing<String>> {
+        let mut w = csv::Writer::from_writer(Vec::new());
+        let io = |e: csv::Error| Error::Io(std::io::Error::other(e));
+        w.write_record(["Title", "URL", "Username", "Password", "Notes", "OTPAuth"]).map_err(io)?;
+        let mut items = self.items(None)?;
+        items.sort_by_key(|r| r.item.title.to_lowercase());
+        for r in items {
+            let i = &r.item;
+            let mut notes = i.notes.clone().unwrap_or_default();
+            for f in &i.fields {
+                notes.push_str(&format!("{}{}: {}", if notes.is_empty() { "" } else { "\n" }, f.name, f.value));
+            }
+            let otp = i.totp.as_deref().map(|t| otpauth(&i.title, t)).unwrap_or_default();
+            w.write_record([&i.title, i.urls.first().unwrap_or(&String::new()), i.username.as_deref().unwrap_or(""), i.password.as_deref().unwrap_or(""), &notes, &otp])
+                .map_err(io)?;
+        }
+        let bytes = Zeroizing::new(w.into_inner().map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?);
+        Ok(Zeroizing::new(String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
     /// Creates a new lockbox with a "Personal" vault. Show the returned Secret Key to the user once.
     pub fn create(path: &Path, password: &str, kdf: KdfParams) -> Result<(Self, SecretKey)> {
         let db = open_db(path)?;
@@ -418,6 +468,36 @@ mod tests {
         let into = lb.import(vec![Imported { vault: Some("Employee".into()), item: login("Figma") }], Some(&personal)).unwrap();
         assert_eq!(into.added, 1);
         assert_eq!(lb.search("figma").unwrap()[0].vault_id, personal, "explicit target wins");
+    }
+
+    #[test]
+    fn backup_opens_with_same_credentials_and_export_round_trips() {
+        let p = tmp();
+        let (lb, sk) = Lockbox::create(&p, "pw", FAST).unwrap();
+        let v = lb.vaults().unwrap()[0].id;
+        let mut gh = login("GitHub");
+        gh.totp = Some("gezd gnbv gy3t qojq".into());
+        gh.notes = Some("line one, with \"quotes\"".into());
+        gh.fields.push(Field { name: "Recovery".into(), value: "abc-123".into(), concealed: true });
+        lb.add_item(&v, gh).unwrap();
+        lb.add_item(&v, Item { title: "Wi-Fi".into(), password: Some("maple-orbit".into()), ..Default::default() }).unwrap();
+
+        let dest = p.with_extension("backup");
+        backup_file(&p, &dest).unwrap();
+        assert!(backup_file(&p, &dest).is_err(), "never overwrites an existing backup");
+        let restored = Lockbox::unlock(&dest, "pw", &sk).unwrap();
+        assert_eq!(restored.items(None).unwrap().len(), 2);
+        assert!(matches!(Lockbox::unlock(&dest, "wrong", &sk), Err(Error::WrongCredentials)));
+
+        let csv = lb.export_csv().unwrap();
+        assert!(csv.starts_with("Title,URL,Username,Password,Notes,OTPAuth"));
+        let back = crate::import::parse_csv(csv.as_bytes()).unwrap().items;
+        let g = &back.iter().find(|i| i.item.title == "GitHub").unwrap().item;
+        assert_eq!((g.username.as_deref(), g.password.as_deref()), (Some("me@example.com"), Some("hunter2")));
+        assert_eq!(g.notes.as_deref(), Some("line one, with \"quotes\"\nRecovery: abc-123"));
+        assert_eq!(g.totp.as_deref(), Some("otpauth://totp/GitHub?secret=GEZDGNBVGY3TQOJQ"));
+        crate::totp::parse(g.totp.as_deref().unwrap()).unwrap();
+        assert!(back.iter().any(|i| i.item.title == "Wi-Fi" && i.item.password.as_deref() == Some("maple-orbit")));
     }
 
     #[test]

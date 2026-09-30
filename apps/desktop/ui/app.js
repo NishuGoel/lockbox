@@ -2,7 +2,7 @@ const root = document.getElementById('root');
 const LEN = { random: [8, 64, 20], memorable: [3, 12, 5], pin: [4, 12, 6] };
 const S = {
   screen: 'loading', items: [], vaults: [], filter: 'all', view: 'items', sel: null, revealed: {}, needSk: false, sk: null,
-  palette: null, editor: null, importer: null, gen: { mode: 'random', len: 20, digits: true, symbols: true, easy: false, value: '' },
+  palette: null, editor: null, importer: null, settings: null, sheet: null, nudged: false, restore: null, gen: { mode: 'random', len: 20, digits: true, symbols: true, easy: false, value: '' },
 };
 let focusAfter = null;
 
@@ -15,7 +15,13 @@ async function boot() {
 }
 
 async function load() {
-  [S.items, S.vaults] = await Promise.all([invoke('items'), invoke('vaults')]);
+  [S.items, S.vaults, S.settings] = await Promise.all([invoke('items'), invoke('vaults'), invoke('settings_get')]);
+  if (!S.nudged) {
+    // one gentle prompt per unlock: backups first, then the monthly Emergency Kit check
+    S.nudged = true;
+    if (!S.settings.backupAsked) S.sheet = { kind: 'backup' };
+    else if (S.settings.recoveryDue) S.sheet = { kind: 'recovery' };
+  }
   if (!visible().some((i) => i.id === S.sel)) S.sel = visible()[0]?.id ?? null;
 }
 
@@ -29,12 +35,13 @@ const selected = () => S.items.find((i) => i.id === S.sel);
 const vaultName = (id) => S.vaults.find((v) => v.id === id)?.name ?? '';
 
 function render() {
-  const screens = { loading: () => [], setup, kit, unlock: unlockScreen, app };
+  const screens = { loading: () => [], setup, kit, unlock: unlockScreen, restore: restoreScreen, app };
   const gate = S.screen !== 'app';
   root.replaceChildren(...(gate ? [h('div', { class: 'dragbar', 'data-tauri-drag-region': true })] : []), ...screens[S.screen]());
   if (S.palette) root.append(palette());
   if (S.editor) root.append(editor());
   if (S.importer) root.append(importer());
+  if (S.sheet) root.append(sheet());
   if (focusAfter) { document.getElementById(focusAfter)?.focus(); focusAfter = null; }
 }
 
@@ -62,11 +69,34 @@ function setup() {
     h('p', { class: 'sub' }, "Choose a master password. Nobody can reset it, so make it a phrase you'll remember."),
     h('div', { class: 'field' }, h('label', { for: 'pw1' }, 'Master password'), pw),
     h('div', { class: 'field' }, h('label', { for: 'pw2' }, 'Repeat it'), pw2),
-    err, btn)];
+    err, btn,
+    h('button', { class: 'link', onClick: () => { S.restore = {}; S.screen = 'restore'; render(); } }, 'Restore from a backup instead'))];
+}
+
+function restoreScreen() {
+  const R = S.restore;
+  const sk = h('input', { class: 'input mono', id: 'rs-sk', placeholder: 'LB1-XXXXXX-XXXXX-…', spellcheck: 'false', value: R.sk ?? '' });
+  const pw = h('input', { class: 'input mono', type: 'password', id: 'rs-pw', onKeydown: (e) => e.key === 'Enter' && go() });
+  const err = h('p', { class: 'error', role: 'alert' }, R.error || '');
+  const btn = h('button', { class: 'btn primary', disabled: !R.path, onClick: () => go() }, 'Restore and unlock');
+  async function go() {
+    btn.disabled = true; btn.textContent = 'Restoring…'; err.textContent = '';
+    try { await invoke('restore', { path: R.path, password: pw.value, secretKey: sk.value || null }); S.restore = null; await load(); S.screen = 'app'; render(); }
+    catch (e) { err.textContent = e === 'need_secret_key' ? 'Enter the Secret Key from your Emergency Kit.' : String(e); btn.disabled = false; btn.textContent = 'Restore and unlock'; }
+  }
+  const choose = async () => { R.sk = sk.value; const p = await invoke('restore_pick'); if (p) R.path = p; render(); };
+  return [gateCard(false,
+    h('h1', {}, 'Restore a backup'),
+    h('p', { class: 'sub' }, 'Use a .lockbox backup from iCloud Drive or wherever you kept it. You need the Secret Key and master password it was made with.'),
+    h('button', { class: 'btn', onClick: choose }, icon('download'), R.path ? R.path.split('/').pop() : 'Choose backup file…'),
+    h('div', { class: 'field' }, h('label', { for: 'rs-sk' }, 'Secret Key'), sk),
+    h('div', { class: 'field' }, h('label', { for: 'rs-pw' }, 'Master password'), pw),
+    err, btn,
+    h('button', { class: 'link', onClick: () => { S.restore = null; S.screen = 'setup'; render(); } }, 'Create a new lockbox instead'))];
 }
 
 function kit() {
-  const btn = h('button', { class: 'btn primary', disabled: true, onClick: async () => { S.sk = null; await load(); S.screen = 'app'; render(); } }, 'Open lockbox');
+  const btn = h('button', { class: 'btn primary', disabled: true, onClick: async () => { S.sk = null; S.screen = 'app'; await load(); render(); } }, 'Open lockbox');
   const box = h('input', { type: 'checkbox', id: 'saved', onChange: (e) => (btn.disabled = !e.target.checked) });
   return [gateCard(true,
     h('h1', {}, 'Your Secret Key'),
@@ -114,8 +144,9 @@ function app() {
     h('div', { class: 'spacer', 'data-tauri-drag-region': true }),
     h('button', { class: 'btn primary sm', onClick: () => openEditor() }, icon('plus'), 'New item'),
     h('button', { class: 'icon-btn', 'aria-label': 'Lock lockbox', title: 'Lock (⌘L)', onClick: () => invoke('lock') }, icon('lock', 17)));
-  const gen = S.view === 'generator';
-  return [h('div', { class: 'app fade' }, top, h('div', { class: 'body' + (gen ? ' wide' : '') }, side(), ...(gen ? [generator()] : [list(), detail()])))];
+  const wide = S.view === 'generator' || S.view === 'settings';
+  const main = S.view === 'generator' ? [generator()] : S.view === 'settings' ? [settingsView()] : [list(), detail()];
+  return [h('div', { class: 'app fade' }, top, h('div', { class: 'body' + (wide ? ' wide' : '') }, side(), ...main))];
 }
 
 function side() {
@@ -129,12 +160,20 @@ function side() {
     nav('fav', 'Favorites', 'star', S.items.filter((i) => i.favorite).length),
     nav('generator', 'Generator', 'spark'),
     h('button', { class: 'nav', onClick: openImporter }, icon('download', 17), 'Import'),
+    h('button', { class: 'nav' + (S.view === 'settings' ? ' on' : ''), onClick: async () => { S.view = 'settings'; S.settings = await invoke('settings_get'); render(); } }, icon('gear', 17), 'Settings'),
     h('div', { class: 'section' }, 'Vaults'),
     S.vaults.map((v) => h('button', { class: 'nav' + (S.view === 'items' && S.filter === v.id ? ' on' : ''), onClick: () => { S.view = 'items'; S.filter = v.id; S.sel = null; load().then(render); } },
       h('span', { class: 'dot', hue: hue(v.name) }), v.name, h('span', { class: 'count' }, S.items.filter((i) => i.vaultId === v.id).length))),
     tags.length > 0 && h('div', { class: 'section' }, 'Tags'),
     tags.length > 0 && h('div', { class: 'tags' }, tags.map((t) => h('button', { class: 'tag' + (S.filter === 'tag:' + t ? ' on' : ''), onClick: () => { S.view = 'items'; S.filter = S.filter === 'tag:' + t ? 'all' : 'tag:' + t; S.sel = null; load().then(render); } }, '#' + t))),
-    h('div', { class: 'side-foot' }, h('i'), 'Auto-locks after 10 idle minutes'));
+    backupFoot());
+}
+
+function backupFoot() {
+  const st = S.settings;
+  const bad = !st || !st.autoBackup || st.lastBackupError;
+  const text = !st ? '' : st.lastBackupError ? 'Last backup failed' : !st.autoBackup ? 'Backups are off' : st.lastBackup ? 'Backed up ' + ago(st.lastBackup) : 'First backup running…';
+  return h('button', { class: 'side-foot' + (bad ? ' warn' : ''), onClick: async () => { S.view = 'settings'; S.settings = await invoke('settings_get'); render(); } }, h('i'), text);
 }
 
 function list() {
@@ -486,6 +525,126 @@ function importer() {
   return scrim;
 }
 
+// ---------- settings ----------
+
+async function refreshSettings() { S.settings = await invoke('settings_get'); render(); }
+
+function settingsView() {
+  const st = S.settings;
+  const backupNow = async () => { try { const f = await invoke('backup_run'); toast('Backed up: ' + f, null); } catch (e) { toast(String(e), null); } refreshSettings(); };
+  return h('section', { class: 'gen' }, h('div', { class: 'gen-in fade' },
+    h('div', {}, h('h1', {}, 'Settings'), h('p', { class: 'muted' }, 'Backups, your Secret Key, and getting your data out.')),
+
+    h('div', { class: 'sec' }, h('h2', {}, 'Backups'),
+      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: st.autoBackup, onChange: async (e) => { await invoke('backup_set', { auto: e.target.checked }); refreshSettings(); } }), 'Back up every day'),
+      h('div', { class: 'sec-row' }, icon(st.icloud ? 'cloud' : 'download', 16), h('span', { class: 'grow path' }, st.backupDirShown),
+        h('button', { class: 'btn sm', onClick: async () => { if (await invoke('backup_choose_dir')) refreshSettings(); } }, 'Change…'),
+        h('button', { class: 'btn sm', onClick: backupNow }, 'Back up now')),
+      h('p', { class: st.lastBackupError ? 'warn-text' : 'faint' }, st.lastBackupError ? 'Last backup failed: ' + st.lastBackupError : (st.lastBackup ? 'Last backup ' + ago(st.lastBackup) : 'No backups yet') + ' · keeps the newest 14'),
+      h('p', { class: 'faint' }, 'Backups are the same encrypted file as your vault. Without your Secret Key and master password they’re useless to anyone, so iCloud Drive is a safe place for them.')),
+
+    h('div', { class: 'sec' }, h('h2', {}, 'Secret Key & Emergency Kit'),
+      h('p', { class: 'muted' }, 'You need the Secret Key and your master password to restore a backup or set up a new device. Nobody can recover them for you.'),
+      h('div', { class: 'sec-row' },
+        h('button', { class: 'btn sm', onClick: () => { S.sheet = { kind: 'recovery' }; render(); } }, icon('shield'), 'Check my Emergency Kit'),
+        h('button', { class: 'btn sm', onClick: () => { S.sheet = { kind: 'reveal' }; render(); } }, icon('key'), 'Show Secret Key')),
+      h('p', { class: 'faint' }, st.lastRecoveryCheck ? 'Last checked ' + ago(st.lastRecoveryCheck) + ' · lockbox asks again every 30 days' : 'Not checked yet')),
+
+    h('div', { class: 'sec' }, h('h2', {}, 'Export & restore'),
+      h('div', { class: 'sec-row' },
+        h('span', { class: 'grow muted' }, 'A CSV that Apple Passwords, Chrome, Bitwarden, 1Password or lockbox can import. It’s plain text: delete it once you’re done.'),
+        h('button', { class: 'btn sm', onClick: () => { S.sheet = { kind: 'export' }; render(); } }, 'Export CSV…')),
+      h('div', { class: 'sec-row' },
+        h('span', { class: 'grow muted' }, 'Replace this vault with a backup. Your current vault is kept aside, not deleted.'),
+        h('button', { class: 'btn sm', onClick: () => { S.sheet = { kind: 'restore' }; render(); } }, 'Restore…'))),
+
+    h('div', { class: 'sec' }, h('h2', {}, 'How your data is protected'),
+      h('div', { class: 'faq' },
+        h('div', {}, h('b', {}, 'Where is it?'), 'In one encrypted file on this Mac, plus the backups above. Nothing is sent anywhere else.'),
+        h('div', {}, h('b', {}, 'If this Mac is stolen'), 'The file can’t be opened without your master password and Secret Key. lockbox locks when the screen locks.'),
+        h('div', {}, h('b', {}, 'If a backup leaks'), 'Useless without the Secret Key, even with a weak master password. That’s what cracked LastPass vaults lacked.'),
+        h('div', {}, h('b', {}, 'If you forget the master password'), 'Your data is gone for good. That’s the price of nobody else being able to get in. Keep your Emergency Kit safe.')))));
+}
+
+function closeSheet() { S.sheet = null; render(); }
+
+function sheet() {
+  const K = S.sheet;
+  const err = h('p', { class: 'error', role: 'alert' }, K.error || '');
+  const fail = (e) => { K.error = String(e); render(); };
+  const pwField = (id, onEnter) => h('input', { class: 'input mono', type: 'password', id, autocomplete: 'current-password', onKeydown: (e) => e.key === 'Enter' && onEnter() });
+  let body;
+  if (K.kind === 'backup') {
+    const on = async () => { try { await invoke('backup_set', { auto: true }); closeSheet(); await refreshSettings(); toast('Backups on', null); } catch (e) { fail(e); } };
+    body = [h('h2', {}, 'Keep a backup?'),
+      h('p', { class: 'muted' }, `Right now your passwords live in one file on this Mac. lockbox can save an encrypted copy to ${S.settings.backupDirShown} every day and keep the last 14.`),
+      h('p', { class: 'faint' }, 'Backups can only be opened with your master password and Secret Key.'),
+      err,
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn', onClick: async () => { await invoke('backup_set', { auto: false }); closeSheet(); refreshSettings(); } }, 'Not now'),
+        h('button', { class: 'btn', onClick: async () => { if (await invoke('backup_choose_dir')) { S.settings = await invoke('settings_get'); render(); } } }, 'Choose folder…'),
+        h('button', { class: 'btn primary', onClick: on }, icon('cloud'), 'Turn on daily backups'))];
+  } else if (K.kind === 'recovery') {
+    const input = h('input', { class: 'input mono', id: 'rc-sk', placeholder: 'LB1-XXXXXX-XXXXX-…', spellcheck: 'false', onKeydown: (e) => e.key === 'Enter' && check() });
+    async function check() {
+      try {
+        if (await invoke('recovery_verify', { secretKey: input.value })) { closeSheet(); refreshSettings(); toast('Emergency Kit checked', 'next check in 30 days'); }
+        else fail('That Secret Key doesn’t match. If you can’t find the right one, use “I can’t find it”.');
+      } catch (e) { fail(e); }
+    }
+    focusAfter = 'rc-sk';
+    body = [h('h2', {}, 'Monthly Emergency Kit check'),
+      h('p', { class: 'muted' }, 'Type the Secret Key from wherever you saved it: paper, a safe, another device. This makes sure you could get back in if this Mac died today.'),
+      h('div', { class: 'field' }, h('label', { for: 'rc-sk' }, 'Secret Key'), input),
+      err,
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn', onClick: () => { S.sheet = { kind: 'reveal', lost: true }; render(); } }, 'I can’t find it'),
+        h('button', { class: 'btn', onClick: async () => { await invoke('recovery_snooze'); closeSheet(); } }, 'Remind me next week'),
+        h('button', { class: 'btn primary', onClick: check }, 'Check'))];
+  } else if (K.kind === 'reveal') {
+    if (K.key) {
+      body = [h('h2', {}, 'Your Secret Key'),
+        h('div', { class: 'secret-key' }, K.key),
+        h('p', { class: 'muted' }, K.lost ? 'Write it down now and keep it somewhere safe and offline, away from this Mac.' : 'Keep it somewhere safe and offline.'),
+        h('div', { class: 'actions' },
+          h('button', { class: 'btn', onClick: async () => { await invoke('copy_text', { text: K.key }); toast('Secret Key copied'); } }, icon('copy'), 'Copy'),
+          h('button', { class: 'btn primary', onClick: async () => { if (K.lost) await invoke('recovery_verify', { secretKey: K.key }); K.key = null; closeSheet(); refreshSettings(); } }, 'I’ve saved it'))];
+    } else {
+      const pw = pwField('rv-pw', () => go());
+      async function go() { try { K.key = await invoke('reveal_secret_key', { password: pw.value }); K.error = ''; render(); } catch (e) { fail(e); } }
+      focusAfter = 'rv-pw';
+      body = [h('h2', {}, 'Show Secret Key'), h('p', { class: 'muted' }, 'Enter your master password to see it.'),
+        h('div', { class: 'field' }, h('label', { for: 'rv-pw' }, 'Master password'), pw), err,
+        h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), h('button', { class: 'btn primary', onClick: go }, 'Show'))];
+    }
+  } else if (K.kind === 'export') {
+    const pw = pwField('ex-pw', () => go());
+    async function go() {
+      try { const p = await invoke('export_csv', { password: pw.value }); if (!p) return; closeSheet(); toast('Exported to ' + p.split('/').pop(), 'plain text: delete it when done'); }
+      catch (e) { fail(e); }
+    }
+    focusAfter = 'ex-pw';
+    body = [h('h2', {}, 'Export all items'),
+      h('p', { class: 'muted' }, 'The CSV holds every password in plain text. Anyone who gets the file can read them.'),
+      h('div', { class: 'field' }, h('label', { for: 'ex-pw' }, 'Master password'), pw), err,
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), h('button', { class: 'btn primary', onClick: go }, 'Export…'))];
+  } else if (K.kind === 'restore') {
+    const pw = pwField('rr-pw', () => go());
+    async function go() {
+      try { await invoke('restore', { path: K.path, password: pw.value, secretKey: null }); S.sheet = null; S.sel = null; await load(); S.view = 'items'; render(); toast('Backup restored', null); }
+      catch (e) { fail(e); }
+    }
+    body = [h('h2', {}, 'Restore a backup'),
+      h('p', { class: 'muted' }, 'This replaces the vault on this Mac with the backup. Your current vault is kept aside as a file, not deleted.'),
+      h('button', { class: 'btn', onClick: async () => { const p = await invoke('restore_pick'); if (p) { K.path = p; render(); } } }, icon('download'), K.path ? K.path.split('/').pop() : 'Choose backup file…'),
+      h('div', { class: 'field' }, h('label', { for: 'rr-pw' }, 'Master password for that backup'), pw), err,
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), h('button', { class: 'btn primary', disabled: !K.path, onClick: go }, 'Restore'))];
+  }
+  const scrim = h('div', { class: 'scrim', onMousedown: (e) => e.target === scrim && K.kind !== 'reveal' && closeSheet() },
+    h('div', { class: 'sheet fade', role: 'dialog', 'aria-label': 'lockbox' }, h('div', { class: 'editor' }, ...body)));
+  return scrim;
+}
+
 // ---------- keyboard + lifecycle ----------
 
 let lastPing = 0;
@@ -493,11 +652,11 @@ document.addEventListener('keydown', (e) => {
   if (Date.now() - lastPing > 15000 && S.screen === 'app') { lastPing = Date.now(); invoke('activity'); }
   if (S.screen !== 'app') return;
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
-  if (e.key === 'Escape') { if (S.importer) closeImporter(); else if (S.editor) closeEditor(); else if (S.palette) closePalette(); return; }
+  if (e.key === 'Escape') { if (S.sheet) closeSheet(); else if (S.importer) closeImporter(); else if (S.editor) closeEditor(); else if (S.palette) closePalette(); return; }
   if (e.metaKey && e.key === 'k') { e.preventDefault(); S.palette ? closePalette() : openPalette(); return; }
   if (e.metaKey && e.key === 'n') { e.preventDefault(); openEditor(); return; }
   if (e.metaKey && e.key === 'l') { e.preventDefault(); invoke('lock'); return; }
-  if (S.palette || S.editor || S.importer || inField || S.view !== 'items') return;
+  if (S.palette || S.editor || S.importer || S.sheet || inField || S.view !== 'items') return;
   if (e.metaKey && e.key === 'c' && !window.getSelection().toString() && selected()?.hasPassword) { e.preventDefault(); copyField(S.sel, 'password', 'Password copied'); return; }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     const v = visible(); const n = v.findIndex((i) => i.id === S.sel);
@@ -508,7 +667,7 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('mousedown', () => { if (Date.now() - lastPing > 15000 && S.screen === 'app') { lastPing = Date.now(); invoke('activity'); } });
 
 listen('locked', () => {
-  Object.assign(S, { screen: 'unlock', items: [], vaults: [], revealed: {}, palette: null, editor: null, importer: null, needSk: false });
+  Object.assign(S, { screen: 'unlock', items: [], vaults: [], revealed: {}, palette: null, editor: null, importer: null, sheet: null, nudged: false, needSk: false });
   S.gen.value = '';
   render();
 });
