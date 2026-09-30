@@ -6,22 +6,76 @@ A personal, end-to-end encrypted password manager in the spirit of 1Password. ma
 
 Security design: [SPEC.md](./SPEC.md)
 
-## Layout (planned)
+## Desktop app
+
+```sh
+cargo install tauri-cli --version '^2' --locked   # once
+cd apps/desktop/src-tauri && cargo tauri build --bundles app
+open ../../../target/release/bundle/macos/lockbox.app
+```
+
+- ⌘K search and actions · ⌘N new item · ⌘L lock · ⌘C copy password of the selected item · ↑↓ move through items
+- **Quick Access:** ⌘⇧Space from anywhere. ↵ copies the password, ⌥↵ the 2FA code, ⌘C the username.
+- Auto-locks after 10 idle minutes or when the Mac's screen locks. While unlocked, the app also serves the CLI, so `lockbox ls` works without a separate `lockbox unlock`.
+- `LOCKBOX_DIR=/some/dir` points the app or CLI at a different lockbox (handy for trying it out).
+
+## Browser extension (Dia, Chrome)
+
+1. Open the lockbox app once. It connects Dia and Chrome automatically.
+2. In the browser open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick `apps/extension`.
+3. Pin the lockbox icon.
+
+- **Saving:** log in anywhere as usual and lockbox offers **Save** / **Update password** (the old password goes to history). "Never for this site" silences a site.
+- **Filling:** **⌘⇧L** fills the login for the page you're on (on a 2FA page it fills the code), or click the icon to choose.
+- **Anti-phishing:** a login only fills on its own site or its subdomains, never on a lookalike, and never on an http downgrade.
+- **Passkeys:** when a site offers to create a passkey, lockbox asks **Save passkey in lockbox?** and keeps it in your vault (and backups). Signing in shows your accounts for that site. **Other options** hands the request to the browser (iCloud Keychain, phone, security key). Keys never reach the page; the site is taken from the browser, not the page.
+- Works while lockbox is unlocked (the app or `lockbox unlock`).
+
+## CLI
+
+```sh
+cargo install --path crates/cli     # installs `lockbox`
+
+lockbox init                        # master password → prints your Secret Key once
+lockbox add GitHub -u me@x.com --url https://github.com --totp <secret>
+lockbox unlock                      # stays unlocked until 10 idle minutes
+lockbox ls [query] [--vault Work]
+lockbox get github                  # details, password masked
+lockbox copy github                 # concealed from clipboard managers, cleared after 90s
+lockbox totp github --copy
+lockbox get github -f password      # raw field for scripts
+lockbox edit github --generate      # rotate password
+lockbox gen -l 32 --copy            # or --pin 6, --no-symbols, --easy-type
+lockbox vaults add Work
+lockbox import 1Password.1pux --from-vault Employee   # or a Chrome/Safari CSV
+lockbox backup                      # encrypted copy (the app does this daily)
+lockbox export ~/Desktop/all.csv    # plaintext, asks for your master password
+lockbox restore <file.lockbox>
+lockbox lock
+```
+
+## Layout
 
 ```
 crates/core     Rust: crypto, vault model, local store, generator, TOTP
 crates/cli      `lockbox` command-line client
 crates/server   sync server (axum + SQLite, single binary)
-apps/desktop    Tauri 2 macOS app
+apps/desktop    Tauri 2 macOS app (plain HTML/CSS/JS, no bundler)
+crates/platform macOS Keychain, clipboard, agent socket, backups, browser connector
+apps/extension  Dia/Chrome extension (Manifest V3, no build step)
 ```
 
 ## Roadmap
 
 - [x] **M0** Security spec (this repo's SPEC.md)
 - [x] **M1** Core: create/unlock account, vault + item CRUD, password generator, TOTP, known-answer tests
-- [ ] **M2** CLI: `init`, `unlock`, `add`, `get`, `ls`, `gen`, `totp`, `copy`
-- [ ] **M3** Desktop: unlock, ⌘K search, item detail, copy + clipboard clear, auto-lock, Touch ID, Quick Access
-- [ ] **M4** Import: 1Password `.1pux`, Chrome/Safari CSV, Bitwarden JSON
-- [ ] **M5** Sync server + multi-device
-- [ ] **M6** Watchtower: breached (HIBP k-anonymity), weak, reused, missing 2FA
-- [ ] **M7** SSH agent, `.env` secret references, share links, passkeys
+- [x] **M2** CLI: `init`, `unlock`, `add`, `get`, `ls`, `gen`, `totp`, `copy`
+- [x] **M3** Desktop: unlock, ⌘K search, item detail + editor, generator, copy + clipboard clear, auto-lock (idle + screen lock), Quick Access
+- [ ] **M3.1** Touch ID unlock (needs a signed build, see SPEC §6)
+- [x] **M4** Import: 1Password `.1pux` (pick vaults, e.g. just Employee), Chrome/Safari/Firefox/Bitwarden CSV
+- [x] **M4.5** Safety net: daily encrypted backups (iCloud Drive), restore, CSV export, monthly Emergency Kit check
+- [x] **M5** Browser extension for Dia + Chrome: offers to save/update every login, fills on ⌘⇧L, 2FA codes, anti-phishing site matching, password history
+- [ ] **M6** Sync server + iPhone app with AutoFill (needs Apple Developer Program)
+- [ ] **M7** Watchtower: breached (HIBP k-anonymity), weak, reused, missing 2FA, one-click change via /.well-known/change-password
+- [x] **M5.1** Passkeys in lockbox for Dia + Chrome (verified against webauthn.io)
+- [ ] **M8** Passkeys on iPhone/Safari (credential provider), Credential Exchange import/export, Touch ID, SSH agent, share links

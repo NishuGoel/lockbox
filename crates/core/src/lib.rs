@@ -1,10 +1,11 @@
 pub mod crypto;
 pub mod generator;
+pub mod import;
 pub mod totp;
 pub mod vault;
 
 pub use crypto::{KdfParams, SecretKey};
-pub use vault::{Field, Item, ItemRecord, Kind, Lockbox, Vault};
+pub use vault::{Field, ImportSummary, Item, ItemRecord, Kind, Lockbox, Passkey, PasswordChange, Vault, backup_file, display_host, site_matches};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -24,6 +25,8 @@ pub enum Error {
     NotInitialized,
     #[error("invalid generator options: {0}")]
     BadGeneratorOptions(&'static str),
+    #[error("{0}")]
+    Import(String),
     #[error("invalid TOTP secret")]
     BadTotp,
     #[error(transparent)]

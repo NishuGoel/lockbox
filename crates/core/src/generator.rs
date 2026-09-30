@@ -22,7 +22,6 @@ impl Default for PasswordOpts {
 
 const AMBIGUOUS: &str = "0O1lI";
 
-// ponytail: random + PIN only; memorable (word-based) needs the EFF wordlist, add when wanted.
 /// Uniform over the pool, guaranteeing one char from each enabled class. ThreadRng is a CSPRNG seeded from the OS.
 pub fn password(o: PasswordOpts) -> Result<String> {
     let classes: Vec<Vec<char>> = [
@@ -47,6 +46,18 @@ pub fn password(o: PasswordOpts) -> Result<String> {
     out.extend((out.len()..o.length).map(|_| *pool.choose(rng).unwrap()));
     out.shuffle(rng);
     Ok(out.into_iter().collect())
+}
+
+/// EFF large wordlist: 7776 words, ~12.9 bits per word.
+const WORDS: &str = include_str!("../data/eff_large_wordlist.txt");
+
+pub fn memorable(words: usize, separator: &str) -> Result<String> {
+    if !(3..=12).contains(&words) {
+        return Err(Error::BadGeneratorOptions("use 3–12 words"));
+    }
+    let list: Vec<&str> = WORDS.lines().collect();
+    let rng = &mut rand::rng();
+    Ok((0..words).map(|_| *list.choose(rng).unwrap()).collect::<Vec<_>>().join(separator))
 }
 
 pub fn pin(length: usize) -> Result<String> {
@@ -76,6 +87,11 @@ mod tests {
         }
         assert!(password(PasswordOpts { lower: false, upper: false, digits: false, symbols: false, ..Default::default() }).is_err());
         assert!(password(PasswordOpts { length: 4, ..Default::default() }).is_err());
+        let m = memorable(4, "-").unwrap();
+        assert_eq!(m.split('-').count(), 4);
+        assert!(m.split('-').all(|w| WORDS.lines().any(|l| l == w)));
+        assert_eq!(WORDS.lines().count(), 7776);
+        assert!(memorable(2, "-").is_err());
         let p = pin(6).unwrap();
         assert!(p.len() == 6 && p.chars().all(|c| c.is_ascii_digit()));
     }
