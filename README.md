@@ -19,6 +19,17 @@ open ../../../target/release/bundle/macos/lockbox.app
 - Auto-locks after 10 idle minutes or when the Mac's screen locks. While unlocked, the app also serves the CLI, so `lockbox ls` works without a separate `lockbox unlock`.
 - `LOCKBOX_DIR=/some/dir` points the app or CLI at a different lockbox (handy for trying it out).
 
+## Browser extension (Dia, Chrome)
+
+1. Open the lockbox app once. It connects Dia and Chrome automatically.
+2. In the browser open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick `apps/extension`.
+3. Pin the lockbox icon.
+
+- **Saving:** log in anywhere as usual and lockbox offers **Save** / **Update password** (the old password goes to history). "Never for this site" silences a site.
+- **Filling:** **⌘⇧L** fills the login for the page you're on (on a 2FA page it fills the code), or click the icon to choose.
+- **Anti-phishing:** a login only fills on its own site or its subdomains, never on a lookalike, and never on an http downgrade.
+- Works while lockbox is unlocked (the app or `lockbox unlock`).
+
 ## CLI
 
 ```sh
@@ -49,7 +60,8 @@ crates/core     Rust: crypto, vault model, local store, generator, TOTP
 crates/cli      `lockbox` command-line client
 crates/server   sync server (axum + SQLite, single binary)
 apps/desktop    Tauri 2 macOS app (plain HTML/CSS/JS, no bundler)
-crates/platform macOS Keychain, concealed clipboard, unlock-agent socket (shared by CLI + app)
+crates/platform macOS Keychain, clipboard, agent socket, backups, browser connector
+apps/extension  Dia/Chrome extension (Manifest V3, no build step)
 ```
 
 ## Roadmap
@@ -61,7 +73,7 @@ crates/platform macOS Keychain, concealed clipboard, unlock-agent socket (shared
 - [ ] **M3.1** Touch ID unlock (needs a signed build, see SPEC §6)
 - [x] **M4** Import: 1Password `.1pux` (pick vaults, e.g. just Employee), Chrome/Safari/Firefox/Bitwarden CSV
 - [x] **M4.5** Safety net: daily encrypted backups (iCloud Drive), restore, CSV export, monthly Emergency Kit check
-- [ ] **M5** Autofill extension for Chromium browsers (Dia, Chrome, Arc)
+- [x] **M5** Browser extension for Dia + Chrome: offers to save/update every login, fills on ⌘⇧L, 2FA codes, anti-phishing site matching, password history
 - [ ] **M6** Sync server + iPhone app with AutoFill (needs Apple Developer Program)
 - [ ] **M7** Watchtower: breached (HIBP k-anonymity), weak, reused, missing 2FA, one-click change via /.well-known/change-password
 - [ ] **M8** Passkeys (Credential Exchange), Touch ID, SSH agent, share links

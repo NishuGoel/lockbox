@@ -8,7 +8,7 @@ use lockbox_core::import::{self, Parsed};
 use lockbox_core::{ImportSummary, Item, KdfParams, Kind, Lockbox, SecretKey, Vault, totp};
 use lockbox_platform::agent::{self, Request};
 use lockbox_platform::backup::{self, Settings};
-use lockbox_platform::mac;
+use lockbox_platform::{mac, native};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
@@ -571,6 +571,20 @@ fn toggle_quick(app: &AppHandle) {
 
 fn main() {
     let dir = lockbox_platform::data_dir().expect("data dir");
+    // Launched by Dia/Chrome as the browser connector, or as the connector's clipboard clearer: no UI.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(origin) = args.get(1).filter(|a| native::is_extension_origin(a)) {
+        native::run(origin, &dir.join("lockbox.db"), &dir.join("agent.sock"));
+        return;
+    }
+    if let (Some("--clear-clipboard"), Some(n)) = (args.get(1).map(String::as_str), args.get(2).and_then(|n| n.parse().ok())) {
+        std::thread::sleep(Duration::from_secs(CLEAR_SECS));
+        mac::clear_if_unchanged(n);
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        native::install_manifests(&exe);
+    }
     let shared = Arc::new(Shared {
         lb: Mutex::new(None),
         db: dir.join("lockbox.db"),

@@ -45,6 +45,48 @@ pub struct Item {
     pub favorite: bool,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Older passwords, newest first. Filled in by `update_item`.
+    pub password_history: Vec<PasswordChange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PasswordChange {
+    pub password: String,
+    /// when it stopped being the current password
+    pub replaced_at: u64,
+}
+
+const HISTORY_MAX: usize = 20;
+
+fn host_of(url: &str) -> Option<String> {
+    let rest = url.trim().split_once("://").map_or(url.trim(), |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next()?.rsplit('@').next()?;
+    let host = host.split(':').next()?.trim_end_matches('.').to_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host).to_string();
+    (!host.is_empty()).then_some(host)
+}
+
+fn scheme_of(url: &str) -> &str {
+    url.trim().split_once("://").map_or("https", |(s, _)| s)
+}
+
+/// Anti-phishing rule for autofill: the page's host must equal the saved host or be a subdomain
+/// of it (saved `github.com` fills on `gist.github.com`, never on `github.com.evil.io`), and an
+/// https login is never filled into an http page.
+// ponytail: host/subdomain rule, no public-suffix list. Ceiling: a login saved for a bare public
+// suffix (e.g. "github.io") would match every site under it; add the PSL if that ever matters.
+pub fn site_matches(saved_url: &str, page_url: &str) -> bool {
+    let (Some(saved), Some(page)) = (host_of(saved_url), host_of(page_url)) else { return false };
+    if !saved.contains('.') && saved != "localhost" {
+        return false;
+    }
+    let downgrade = scheme_of(page_url).eq_ignore_ascii_case("http") && !scheme_of(saved_url).eq_ignore_ascii_case("http");
+    !downgrade && (page == saved || page.ends_with(&format!(".{saved}")))
+}
+
+/// The host shown to people and used as a new item's title.
+pub fn display_host(url: &str) -> Option<String> {
+    host_of(url)
 }
 
 impl Item {
@@ -296,6 +338,12 @@ impl Lockbox {
         let cur = self.get_item(id)?;
         item.created_at = cur.item.created_at;
         item.updated_at = now();
+        // history is owned by the store: callers can't rewrite or drop it
+        item.password_history = cur.item.password_history;
+        if let Some(old) = cur.item.password.filter(|old| item.password.as_ref() != Some(old)) {
+            item.password_history.insert(0, PasswordChange { password: old, replaced_at: item.updated_at });
+            item.password_history.truncate(HISTORY_MAX);
+        }
         self.write_item(id, &cur.vault_id, cur.version + 1, &item)
     }
 
@@ -498,6 +546,58 @@ mod tests {
         assert_eq!(g.totp.as_deref(), Some("otpauth://totp/GitHub?secret=GEZDGNBVGY3TQOJQ"));
         crate::totp::parse(g.totp.as_deref().unwrap()).unwrap();
         assert!(back.iter().any(|i| i.item.title == "Wi-Fi" && i.item.password.as_deref() == Some("maple-orbit")));
+    }
+
+    #[test]
+    fn site_matching_blocks_lookalikes() {
+        let ok = [
+            ("https://github.com/login", "https://github.com/session"),
+            ("github.com", "https://gist.github.com/"),
+            ("https://www.github.com", "https://github.com"),
+            ("https://accounts.google.com/signin", "https://ACCOUNTS.google.com./x"),
+            ("http://router.local", "http://router.local:8080/"),
+            ("http://localhost:3000", "http://localhost:5173"),
+        ];
+        for (saved, page) in ok {
+            assert!(site_matches(saved, page), "{saved} should fill on {page}");
+        }
+        let bad = [
+            ("https://github.com", "https://github.com.evil.io/login"),
+            ("https://github.com", "https://evilgithub.com"),
+            ("https://github.com", "http://github.com"),
+            ("https://gist.github.com", "https://github.com"),
+            ("https://github.com", "https://user@evil.io/github.com"),
+            ("https://bank.example", "https://bank.example@evil.io/"),
+            ("com", "https://anything.com"),
+            ("", "https://github.com"),
+        ];
+        for (saved, page) in bad {
+            assert!(!site_matches(saved, page), "{saved} must NOT fill on {page}");
+        }
+    }
+
+    #[test]
+    fn password_history_records_changes_only() {
+        let (lb, _) = Lockbox::create(&tmp(), "pw", FAST).unwrap();
+        let v = lb.vaults().unwrap()[0].id;
+        let id = lb.add_item(&v, login("GitHub")).unwrap();
+        let mut it = lb.get_item(&id).unwrap().item;
+        it.notes = Some("same password".into());
+        lb.update_item(&id, it).unwrap();
+        assert!(lb.get_item(&id).unwrap().item.password_history.is_empty());
+        let mut it = lb.get_item(&id).unwrap().item;
+        it.password = Some("second".into());
+        lb.update_item(&id, it).unwrap();
+        lb.update_item(&id, Item { title: "GitHub".into(), password: Some("second".into()), ..Default::default() }).unwrap();
+        assert_eq!(lb.get_item(&id).unwrap().item.password_history.len(), 1, "a caller omitting history can't erase it");
+        for n in 0..25 {
+            let mut it = lb.get_item(&id).unwrap().item;
+            it.password = Some(format!("pw{n}"));
+            lb.update_item(&id, it).unwrap();
+        }
+        let h = lb.get_item(&id).unwrap().item.password_history;
+        assert_eq!(h.len(), 20);
+        assert_eq!((h[0].password.as_str(), h[19].password.as_str()), ("pw23", "pw4"));
     }
 
     #[test]

@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "lockbox",
+  "version": "0.1.0",
+  "description": "Fill and save logins with your lockbox password manager.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAirgDRbjFlitGYR5KE2zrE82h+SlBDuDh0U29yVgoh6C2acubnk5bHcgP9ga2e2YRGsv0ps6mx0KKLPZ5uWrdGU8PdQrrGP1/J4/m4mJOqn2PsTvkKXt1H5/d2hI7LU27wDcRfksf3UztaZWdpEpUIBAPAjKLBVZy6B+K23N0KbPwefO03wgYuDO0FdAx9o2HFOvduD1Zjse6NLTzHx6+u8DRHbeHLP2WwnXrlwmq0K/9909nQW/Wd40om2HCPB5lGCShZUloA3pvRaMwNAQtncEn+yyaoyuMJ4JMWMghKIeoKwnSjeoYnnNkctaEiej2I5J3wOzCWm89vlXo+NqcqQIDAQAB",
+  "minimum_chrome_version": "127",
+  "permissions": ["nativeMessaging", "storage", "webNavigation", "activeTab"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    { "matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "all_frames": true, "run_at": "document_idle" }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "lockbox",
+    "default_icon": { "16": "icons/16.png", "32": "icons/32.png" }
+  },
+  "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "commands": {
+    "fill": { "suggested_key": { "default": "Ctrl+Shift+L", "mac": "Command+Shift+L" }, "description": "Fill the login on this page" }
+  }
+}

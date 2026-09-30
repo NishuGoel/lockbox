@@ -1,0 +1,8 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Example login</title></head>
+<body style="font-family:system-ui;padding:40px;background:#f4f4f5">
+<h1>Sign in to Example</h1>
+<form id="f"><p><input id="email" type="email" autocomplete="username" placeholder="Email"></p>
+<p><input id="pw" type="password" autocomplete="current-password" placeholder="Password"></p>
+<p><button id="go">Log in</button></p></form>
+<script>document.getElementById('f').onsubmit=(e)=>{e.preventDefault();setTimeout(()=>location.href='/welcome.html',50)}</script>
+</body></html>
