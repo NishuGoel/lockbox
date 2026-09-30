@@ -85,6 +85,13 @@ pub struct Vault {
     pub name: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ImportSummary {
+    pub added: usize,
+    pub duplicates: usize,
+    pub vaults_created: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Header {
     format: u8,
@@ -283,6 +290,48 @@ impl Lockbox {
         .collect()
     }
 
+    /// Adds imported items. `target` puts everything in one vault; otherwise each item goes to the
+    /// vault named like its source vault (created if missing), falling back to the first vault.
+    /// Exact duplicates (title, username, first url, password) of existing or earlier items are skipped,
+    /// so importing the same file twice is harmless.
+    pub fn import(&self, items: Vec<crate::import::Imported>, target: Option<&Uuid>) -> Result<ImportSummary> {
+        type Key = (String, Option<String>, Option<String>, Option<String>);
+        let key = |i: &Item| -> Key { (i.title.to_lowercase(), i.username.clone(), i.urls.first().cloned(), i.password.clone()) };
+        let mut seen: std::collections::HashSet<Key> = self.items(None)?.iter().map(|r| key(&r.item)).collect();
+        let mut vaults = self.vaults()?;
+        let fallback = vaults.first().ok_or(Error::NotFound)?.id;
+        let mut sum = ImportSummary::default();
+        for imp in items {
+            if !seen.insert(key(&imp.item)) {
+                sum.duplicates += 1;
+                continue;
+            }
+            let vault = match (target, &imp.vault) {
+                (Some(t), _) => *t,
+                (None, None) => fallback,
+                (None, Some(name)) => match vaults.iter().find(|v| v.name.eq_ignore_ascii_case(name)) {
+                    Some(v) => v.id,
+                    None => {
+                        let id = self.create_vault(name)?;
+                        vaults.push(Vault { id, name: name.clone() });
+                        sum.vaults_created.push(name.clone());
+                        id
+                    }
+                },
+            };
+            let (created, updated) = (imp.item.created_at, imp.item.updated_at);
+            let id = self.add_item(&vault, imp.item)?;
+            if created > 0 {
+                // keep the source's timestamps when it has them
+                let mut rec = self.get_item(&id)?;
+                (rec.item.created_at, rec.item.updated_at) = (created, updated.max(created));
+                self.write_item(&id, &vault, rec.version, &rec.item)?;
+            }
+            sum.added += 1;
+        }
+        Ok(sum)
+    }
+
     // ponytail: linear scan over decrypted items; fine to ~10k items, add an in-memory index if search lags.
     pub fn search(&self, query: &str) -> Result<Vec<ItemRecord>> {
         Ok(self.items(None)?.into_iter().filter(|r| r.item.matches(query)).collect())
@@ -344,6 +393,31 @@ mod tests {
         assert!(matches!(lb.get_item(&gh), Err(Error::NotFound)));
         assert!(matches!(lb.delete_item(&gh), Err(Error::NotFound)));
         assert_eq!(lb.items(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn import_routes_vaults_and_skips_duplicates() {
+        use crate::import::Imported;
+        let (lb, _) = Lockbox::create(&tmp(), "pw", FAST).unwrap();
+        let personal = lb.vaults().unwrap()[0].id;
+        let batch = || vec![
+            Imported { vault: Some("Employee".into()), item: login("Jira") },
+            Imported { vault: None, item: login("GitHub") },
+            Imported { vault: Some("personal".into()), item: Item { title: "Bank".into(), ..Default::default() } },
+        ];
+        let s = lb.import(batch(), None).unwrap();
+        assert_eq!((s.added, s.duplicates, s.vaults_created.clone()), (3, 0, vec!["Employee".to_string()]));
+        let employee = lb.vaults().unwrap().into_iter().find(|v| v.name == "Employee").unwrap().id;
+        assert_eq!(lb.items(Some(&employee)).unwrap()[0].item.title, "Jira");
+        assert_eq!(lb.items(Some(&personal)).unwrap().len(), 2, "unnamed + case-insensitive match go to Personal");
+
+        let again = lb.import(batch(), None).unwrap();
+        assert_eq!((again.added, again.duplicates), (0, 3));
+        assert_eq!(lb.items(None).unwrap().len(), 3);
+
+        let into = lb.import(vec![Imported { vault: Some("Employee".into()), item: login("Figma") }], Some(&personal)).unwrap();
+        assert_eq!(into.added, 1);
+        assert_eq!(lb.search("figma").unwrap()[0].vault_id, personal, "explicit target wins");
     }
 
     #[test]

@@ -35,6 +35,7 @@ lockbox get github -f password      # raw field for scripts
 lockbox edit github --generate      # rotate password
 lockbox gen -l 32 --copy            # or --pin 6, --no-symbols, --easy-type
 lockbox vaults add Work
+lockbox import 1Password.1pux --from-vault Employee   # or a Chrome/Safari CSV
 lockbox lock
 ```
 
@@ -55,7 +56,7 @@ crates/platform macOS Keychain, concealed clipboard, unlock-agent socket (shared
 - [x] **M2** CLI: `init`, `unlock`, `add`, `get`, `ls`, `gen`, `totp`, `copy`
 - [x] **M3** Desktop: unlock, ⌘K search, item detail + editor, generator, copy + clipboard clear, auto-lock (idle + screen lock), Quick Access
 - [ ] **M3.1** Touch ID unlock (needs a signed build, see SPEC §6)
-- [ ] **M4** Import: 1Password `.1pux`, Chrome/Safari CSV, Bitwarden JSON
+- [x] **M4** Import: 1Password `.1pux` (pick vaults, e.g. just Employee), Chrome/Safari/Firefox/Bitwarden CSV
 - [ ] **M5** Sync server + multi-device
 - [ ] **M6** Watchtower: breached (HIBP k-anonymity), weak, reused, missing 2FA
 - [ ] **M7** SSH agent, `.env` secret references, share links, passkeys

@@ -181,3 +181,17 @@ body.quick #root::before{display:none}
 .q-foot span{display:flex;align-items:center;gap:6px}
 .q-locked{height:356px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--text-2)}
 .q-in .brand{width:auto}
+
+/* import */
+.srcs{display:grid;gap:10px}
+.src{padding:13px 16px;border-radius:14px;background:rgba(255,255,255,0.03);border:1px solid var(--line);color:var(--text-2)}
+.src b{display:block;color:var(--text);font-weight:600;margin-bottom:2px}
+.pick{display:flex;flex-direction:column;gap:6px}
+.pick label{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--line)}
+.pick label.on{border-color:rgba(94,234,212,0.5);background:var(--accent-soft)}
+.pick input{width:16px;height:16px;accent-color:var(--accent)}
+.pick .faint{margin-left:auto}
+.callout{display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:rgba(251,146,60,0.08);border:1px solid rgba(251,146,60,0.3)}
+.callout svg{color:var(--danger);flex-shrink:0}
+.callout p{flex:1}
+.stats{display:flex;flex-direction:column;gap:4px;color:var(--text-2)}

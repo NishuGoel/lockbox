@@ -4,12 +4,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lockbox_core::generator::{self, PasswordOpts};
-use lockbox_core::{Item, KdfParams, Kind, Lockbox, SecretKey, Vault, totp};
+use lockbox_core::import::{self, Parsed};
+use lockbox_core::{ImportSummary, Item, KdfParams, Kind, Lockbox, SecretKey, Vault, totp};
 use lockbox_platform::agent::{self, Request};
 use lockbox_platform::mac;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -33,6 +35,8 @@ struct Shared {
     sock: PathBuf,
     last: AtomicU64,
     hosting: AtomicBool,
+    /// The export being imported. Its path is the only file `delete_import_file` may remove.
+    pending: Mutex<Option<(PathBuf, Option<Parsed>)>>,
 }
 
 type S<'a> = State<'a, Arc<Shared>>;
@@ -58,6 +62,9 @@ impl Shared {
 
     /// Drops the keys (zeroized on drop) and tells every window.
     fn drop_keys(&self, app: &AppHandle) {
+        if let Some((_, parsed)) = self.pending.lock().unwrap().as_mut() {
+            parsed.take();
+        }
         if self.lb.lock().unwrap().take().is_some() {
             let _ = app.emit("locked", ());
             if let Some(q) = app.get_webview_window("quick") {
@@ -330,6 +337,65 @@ fn delete_item(s: S, id: Uuid) -> Res<()> {
     s.with(|lb| lb.delete_item(&id))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportPreview {
+    file_name: String,
+    count: usize,
+    vaults: Vec<(String, usize)>,
+    skipped: Vec<String>,
+}
+
+/// Native file picker (from Rust, so the page needs no file-system access), then parse.
+#[tauri::command]
+async fn import_pick(app: AppHandle, s: S<'_>) -> Res<Option<ImportPreview>> {
+    if !s.unlocked() {
+        return Err("locked".into());
+    }
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_title("Choose a password export")
+        .add_filter("Password export", &["1pux", "csv"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(err)?;
+    let parsed = import::parse_file(&path).map_err(err)?;
+    let preview = ImportPreview {
+        file_name: path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+        count: parsed.items.len(),
+        vaults: parsed.vaults(),
+        skipped: parsed.skipped.clone(),
+    };
+    *s.pending.lock().unwrap() = Some((path, Some(parsed)));
+    Ok(Some(preview))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportResult {
+    summary: ImportSummary,
+    skipped: Vec<String>,
+}
+
+#[tauri::command]
+fn import_run(s: S, only_vaults: Vec<String>, vault_id: Option<Uuid>) -> Res<ImportResult> {
+    let mut parsed = s.pending.lock().unwrap().as_mut().and_then(|(_, p)| p.take()).ok_or("choose a file first")?;
+    if !parsed.vaults().is_empty() {
+        parsed = parsed.only_vaults(&only_vaults);
+    }
+    let summary = s.with(|lb| lb.import(parsed.items, vault_id.as_ref()))?;
+    Ok(ImportResult { summary, skipped: parsed.skipped })
+}
+
+#[tauri::command]
+fn delete_import_file(s: S) -> Res<()> {
+    let (path, _) = s.pending.lock().unwrap().take().ok_or("nothing to delete")?;
+    std::fs::remove_file(&path).map_err(err)
+}
+
 #[tauri::command]
 fn hide_quick(app: AppHandle) {
     if let Some(w) = app.get_webview_window("quick") {
@@ -370,10 +436,12 @@ fn main() {
         sock: dir.join("agent.sock"),
         last: AtomicU64::new(now()),
         hosting: AtomicBool::new(false),
+        pending: Mutex::new(None),
     });
     let quick = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_shortcut(quick)
@@ -408,7 +476,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             status, create, unlock, lock, activity, vaults, items, get_item, reveal, totp_code, copy, copy_text, generate,
-            save_item, delete_item, hide_quick, open_main
+            save_item, delete_item, import_pick, import_run, delete_import_file, hide_quick, open_main
         ])
         .build(tauri::generate_context!())
         .expect("tauri app");

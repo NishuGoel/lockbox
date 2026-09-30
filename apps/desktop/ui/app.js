@@ -2,7 +2,7 @@ const root = document.getElementById('root');
 const LEN = { random: [8, 64, 20], memorable: [3, 12, 5], pin: [4, 12, 6] };
 const S = {
   screen: 'loading', items: [], vaults: [], filter: 'all', view: 'items', sel: null, revealed: {}, needSk: false, sk: null,
-  palette: null, editor: null, gen: { mode: 'random', len: 20, digits: true, symbols: true, easy: false, value: '' },
+  palette: null, editor: null, importer: null, gen: { mode: 'random', len: 20, digits: true, symbols: true, easy: false, value: '' },
 };
 let focusAfter = null;
 
@@ -34,6 +34,7 @@ function render() {
   root.replaceChildren(...(gate ? [h('div', { class: 'dragbar', 'data-tauri-drag-region': true })] : []), ...screens[S.screen]());
   if (S.palette) root.append(palette());
   if (S.editor) root.append(editor());
+  if (S.importer) root.append(importer());
   if (focusAfter) { document.getElementById(focusAfter)?.focus(); focusAfter = null; }
 }
 
@@ -127,6 +128,7 @@ function side() {
     nav('all', 'All items', 'grid', S.items.length),
     nav('fav', 'Favorites', 'star', S.items.filter((i) => i.favorite).length),
     nav('generator', 'Generator', 'spark'),
+    h('button', { class: 'nav', onClick: openImporter }, icon('download', 17), 'Import'),
     h('div', { class: 'section' }, 'Vaults'),
     S.vaults.map((v) => h('button', { class: 'nav' + (S.view === 'items' && S.filter === v.id ? ' on' : ''), onClick: () => { S.view = 'items'; S.filter = v.id; S.sel = null; load().then(render); } },
       h('span', { class: 'dot', hue: hue(v.name) }), v.name, h('span', { class: 'count' }, S.items.filter((i) => i.vaultId === v.id).length))),
@@ -168,7 +170,9 @@ function detail() {
   if (!it) return h('section', { class: 'detail' }, h('div', { class: 'empty' },
     h('h2', {}, S.items.length ? 'Pick an item' : 'Your lockbox is empty'),
     h('p', {}, S.items.length ? 'Or press ⌘K to search.' : 'Add your first login, or import from another password manager later.'),
-    !S.items.length && h('button', { class: 'btn primary', onClick: () => openEditor() }, icon('plus'), 'New item')));
+    !S.items.length && h('div', { class: 'with-btns' },
+      h('button', { class: 'btn primary', onClick: openImporter }, icon('download'), 'Import from 1Password or a browser'),
+      h('button', { class: 'btn', onClick: () => openEditor() }, icon('plus'), 'New item'))));
 
   const rows = [];
   if (it.username) rows.push(fieldRow('username', h('span', { class: 'v' }, it.username), copyBtn('Copy username', () => copyField(it.id, 'username', 'Username copied'))));
@@ -309,6 +313,7 @@ function paletteResults() {
   const actions = [
     ['New item', '⌘N', 'plus', () => { S.palette = null; openEditor(); }],
     ['Generate a password', 'Generator', 'spark', () => { S.palette = null; S.view = 'generator'; render(); regen(); }],
+    ['Import passwords', '1Password, Chrome, Safari', 'download', () => { S.palette = null; openImporter(); }],
     ['All items', 'View', 'grid', () => { S.palette = null; S.view = 'items'; S.filter = 'all'; render(); }],
     ['Lock lockbox', '⌘L', 'lock', () => { S.palette = null; invoke('lock'); }],
   ].filter(([l]) => !q || l.toLowerCase().includes(q.toLowerCase())).map(([label, hint, ic, run]) => ({ kind: 'action', label, hint, ic, run }));
@@ -403,6 +408,84 @@ function editor() {
   return scrim;
 }
 
+// ---------- import ----------
+
+function openImporter() { S.importer = { step: 'intro', error: '' }; render(); }
+async function closeImporter() { const done = S.importer?.step === 'done'; S.importer = null; if (done) await load(); render(); }
+
+function importer() {
+  const I = S.importer;
+  const body = [];
+  if (I.step === 'intro') {
+    const pick = async () => {
+      I.error = '';
+      try {
+        const p = await invoke('import_pick');
+        if (!p) return;
+        // 1Password business accounts: default to just your Employee vault, never the company's shared ones
+        const employee = p.vaults.filter(([n]) => n.toLowerCase() === 'employee');
+        Object.assign(I, { step: 'preview', preview: p, selected: new Set((employee.length ? employee : p.vaults).map(([n]) => n)), target: '' });
+      } catch (e) { I.error = String(e); }
+      render();
+    };
+    body.push(
+      h('h2', {}, 'Import passwords'),
+      h('p', { class: 'muted' }, 'Export from the app you use now, then choose the file here. Everything stays on this Mac.'),
+      h('div', { class: 'srcs' },
+        h('div', { class: 'src' }, h('b', {}, '1Password'), 'File › Export, choose your account, pick the 1PUX format. You choose which vaults come across.'),
+        h('div', { class: 'src' }, h('b', {}, 'Chrome, Arc, Brave, Edge'), 'Open chrome://password-manager/settings and choose Export passwords.'),
+        h('div', { class: 'src' }, h('b', {}, 'Safari'), 'Open the Passwords app, then File › Export All Passwords….'),
+        h('p', { class: 'faint' }, 'Firefox and Bitwarden CSV exports work too.')),
+      h('p', { class: 'error', role: 'alert' }, I.error || ''),
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeImporter }, 'Cancel'), h('button', { class: 'btn primary', onClick: pick }, icon('download'), 'Choose export file…')));
+  } else if (I.step === 'preview') {
+    const p = I.preview;
+    const count = p.vaults.length ? p.vaults.filter(([n]) => I.selected.has(n)).reduce((a, [, c]) => a + c, 0) : p.count;
+    const run = async () => {
+      try { I.result = await invoke('import_run', { onlyVaults: [...I.selected], vaultId: I.target || null }); I.step = 'done'; }
+      catch (e) { I.error = String(e); }
+      render();
+    };
+    const targets = h('select', { class: 'input', id: 'imp-target', onChange: (e) => (I.target = e.target.value) },
+      h('option', { value: '' }, p.vaults.length ? 'Vaults with the same names (created if needed)' : `${S.vaults[0]?.name ?? 'Personal'} (default)`),
+      S.vaults.map((v) => h('option', { value: v.id }, v.name)));
+    targets.value = I.target;
+    body.push(
+      h('h2', {}, 'Import from ' + p.fileName),
+      p.vaults.length
+        ? h('div', { class: 'field' }, h('span', { class: 'label' }, 'Which 1Password vaults?'), h('div', { class: 'pick' }, p.vaults.map(([name, c]) => {
+            const on = I.selected.has(name);
+            return h('label', { class: on ? 'on' : '' }, h('input', { type: 'checkbox', checked: on, onChange: () => { on ? I.selected.delete(name) : I.selected.add(name); render(); } }), name, h('span', { class: 'faint' }, `${c} item${c === 1 ? '' : 's'}`));
+          })))
+        : h('p', { class: 'muted' }, `${p.count} items found.`),
+      h('div', { class: 'field' }, h('label', { for: 'imp-target' }, 'Put them in'), targets),
+      p.skipped.length > 0 && h('p', { class: 'faint' }, 'Won’t import: ' + p.skipped.slice(0, 3).join('; ') + (p.skipped.length > 3 ? `; and ${p.skipped.length - 3} more` : '')),
+      h('p', { class: 'error', role: 'alert' }, I.error || ''),
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeImporter }, 'Cancel'),
+        h('button', { class: 'btn primary', disabled: count === 0, onClick: run }, `Import ${count} item${count === 1 ? '' : 's'}`)));
+  } else {
+    const { summary: r, skipped } = I.result;
+    const del = h('button', { class: 'btn sm danger', disabled: I.deleted, onClick: async () => {
+      try { await invoke('delete_import_file'); I.deleted = true; } catch (e) { I.error = String(e); }
+      render();
+    } }, icon('trash'), I.deleted ? 'Deleted' : 'Delete ' + I.preview.fileName);
+    body.push(
+      h('h2', {}, `Imported ${r.added} item${r.added === 1 ? '' : 's'}`),
+      h('div', { class: 'stats' },
+        r.vaultsCreated.length > 0 && h('span', {}, 'New vaults: ' + r.vaultsCreated.join(', ')),
+        r.duplicates > 0 && h('span', {}, `${r.duplicates} already in lockbox, skipped`),
+        skipped.map((x) => h('span', { class: 'faint' }, 'Skipped ' + x))),
+      I.deleted
+        ? h('p', { class: 'note' }, icon('check', 13), 'Export file deleted.')
+        : h('div', { class: 'callout' }, icon('shield', 20), h('p', {}, 'The export file still holds every password in plain text. Delete it now.'), del),
+      h('p', { class: 'error', role: 'alert' }, I.error || ''),
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', onClick: closeImporter }, 'Done')));
+  }
+  const scrim = h('div', { class: 'scrim', onMousedown: (e) => e.target === scrim && I.step !== 'done' && closeImporter() },
+    h('div', { class: 'sheet fade', role: 'dialog', 'aria-label': 'Import passwords' }, h('div', { class: 'editor' }, ...body)));
+  return scrim;
+}
+
 // ---------- keyboard + lifecycle ----------
 
 let lastPing = 0;
@@ -410,11 +493,11 @@ document.addEventListener('keydown', (e) => {
   if (Date.now() - lastPing > 15000 && S.screen === 'app') { lastPing = Date.now(); invoke('activity'); }
   if (S.screen !== 'app') return;
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
-  if (e.key === 'Escape') { if (S.editor) closeEditor(); else if (S.palette) closePalette(); return; }
+  if (e.key === 'Escape') { if (S.importer) closeImporter(); else if (S.editor) closeEditor(); else if (S.palette) closePalette(); return; }
   if (e.metaKey && e.key === 'k') { e.preventDefault(); S.palette ? closePalette() : openPalette(); return; }
   if (e.metaKey && e.key === 'n') { e.preventDefault(); openEditor(); return; }
   if (e.metaKey && e.key === 'l') { e.preventDefault(); invoke('lock'); return; }
-  if (S.palette || S.editor || inField || S.view !== 'items') return;
+  if (S.palette || S.editor || S.importer || inField || S.view !== 'items') return;
   if (e.metaKey && e.key === 'c' && !window.getSelection().toString() && selected()?.hasPassword) { e.preventDefault(); copyField(S.sel, 'password', 'Password copied'); return; }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     const v = visible(); const n = v.findIndex((i) => i.id === S.sel);
@@ -425,7 +508,7 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('mousedown', () => { if (Date.now() - lastPing > 15000 && S.screen === 'app') { lastPing = Date.now(); invoke('activity'); } });
 
 listen('locked', () => {
-  Object.assign(S, { screen: 'unlock', items: [], vaults: [], revealed: {}, palette: null, editor: null, needSk: false });
+  Object.assign(S, { screen: 'unlock', items: [], vaults: [], revealed: {}, palette: null, editor: null, importer: null, needSk: false });
   S.gen.value = '';
   render();
 });
