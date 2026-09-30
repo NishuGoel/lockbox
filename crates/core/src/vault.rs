@@ -141,7 +141,13 @@ pub struct ItemRecord {
     pub vault_id: Uuid,
     pub version: u64,
     pub item: Item,
+    /// set while the item sits in Recently deleted
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<u64>,
 }
+
+/// Items stay in Recently deleted this long before their data is wiped.
+pub const TRASH_DAYS: u64 = 30;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vault {
@@ -214,6 +220,11 @@ fn open_db(path: &Path) -> Result<Connection> {
            version INTEGER NOT NULL, blob BLOB -- NULL = tombstone (kept for sync)
          );",
     )?;
+    // v2: Recently deleted
+    let has_deleted: i64 = db.query_row("SELECT COUNT(*) FROM pragma_table_info('items') WHERE name='deleted_at'", [], |r| r.get(0))?;
+    if has_deleted == 0 {
+        db.execute_batch("ALTER TABLE items ADD COLUMN deleted_at INTEGER")?;
+    }
     Ok(db)
 }
 
@@ -297,7 +308,9 @@ impl Lockbox {
         let h = read_header(&db)?.ok_or(Error::NotInitialized)?;
         let kek = crypto::kek(&crypto::derive_auk(password, sk, &h.salt, h.kdf)?);
         crypto::open(&kek, &h.canary, CANARY_AAD).map_err(|_| Error::WrongCredentials)?;
-        Ok(Self { db, kek })
+        let lb = Self { db, kek };
+        let _ = lb.purge_expired();
+        Ok(lb)
     }
 
     fn vault_key(&self, vault: &Uuid) -> Result<Key> {
@@ -369,26 +382,130 @@ impl Lockbox {
         self.write_item(id, &cur.vault_id, cur.version + 1, &item)
     }
 
-    /// Soft delete: leaves a tombstone so the deletion can sync.
+    /// Moves an item to Recently deleted. It stays restorable for `TRASH_DAYS`.
     pub fn delete_item(&self, id: &Uuid) -> Result<()> {
         let n = self.db.execute(
-            "UPDATE items SET blob=NULL, version=version+1 WHERE id=?1 AND blob IS NOT NULL",
-            [id.to_string()],
+            "UPDATE items SET deleted_at=?2 WHERE id=?1 AND blob IS NOT NULL AND deleted_at IS NULL",
+            params![id.to_string(), now() as i64],
         )?;
         if n == 0 { Err(Error::NotFound) } else { Ok(()) }
+    }
+
+    pub fn restore_item(&self, id: &Uuid) -> Result<()> {
+        let n = self.db.execute("UPDATE items SET deleted_at=NULL WHERE id=?1 AND blob IS NOT NULL AND deleted_at IS NOT NULL", [id.to_string()])?;
+        if n == 0 { Err(Error::NotFound) } else { Ok(()) }
+    }
+
+    /// Wipes an item's data for good, leaving a tombstone so the deletion can sync later.
+    pub fn purge_item(&self, id: &Uuid) -> Result<()> {
+        let n = self.db.execute("UPDATE items SET blob=NULL, version=version+1 WHERE id=?1 AND blob IS NOT NULL AND deleted_at IS NOT NULL", [id.to_string()])?;
+        if n == 0 { Err(Error::NotFound) } else { Ok(()) }
+    }
+
+    /// Wipes items that have been in Recently deleted longer than `TRASH_DAYS`. Returns how many.
+    pub fn purge_expired(&self) -> Result<usize> {
+        let cutoff = now().saturating_sub(TRASH_DAYS * 86_400) as i64;
+        Ok(self.db.execute("UPDATE items SET blob=NULL, version=version+1 WHERE blob IS NOT NULL AND deleted_at IS NOT NULL AND deleted_at < ?1", [cutoff])?)
+    }
+
+    /// What's in Recently deleted, newest first.
+    pub fn trash(&self) -> Result<Vec<ItemRecord>> {
+        let mut stmt = self.db.prepare("SELECT id, vault_id, version, blob, deleted_at FROM items WHERE blob IS NOT NULL AND deleted_at IS NOT NULL ORDER BY deleted_at DESC")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)?)))?;
+        rows.map(|row| {
+            let (a, b, c, d, del) = row?;
+            let mut rec = self.decode(a, b, c, d)?;
+            rec.deleted_at = Some(del as u64);
+            Ok(rec)
+        })
+        .collect()
+    }
+
+    /// Makes an older password current again; the replaced one goes into history.
+    pub fn restore_old_password(&self, id: &Uuid, index: usize) -> Result<()> {
+        let cur = self.get_item(id)?;
+        let mut item = cur.item;
+        if index >= item.password_history.len() {
+            return Err(Error::NotFound);
+        }
+        let old = item.password_history.remove(index);
+        if let Some(p) = item.password.replace(old.password) {
+            item.password_history.insert(0, PasswordChange { password: p, replaced_at: now() });
+        }
+        item.updated_at = now();
+        self.write_item(id, &cur.vault_id, cur.version + 1, &item)
+    }
+
+    pub fn rename_vault(&self, id: &Uuid, name: &str) -> Result<()> {
+        let vk = self.vault_key(id)?;
+        self.db.execute("UPDATE vaults SET meta_blob=?2 WHERE id=?1", params![id.to_string(), crypto::seal(&vk, name.as_bytes(), &vault_meta_aad(id))])?;
+        Ok(())
+    }
+
+    /// Only empty vaults can go (nothing live or in Recently deleted), and never the last one.
+    pub fn delete_vault(&self, id: &Uuid) -> Result<()> {
+        self.vault_key(id)?;
+        let used: i64 = self.db.query_row("SELECT COUNT(*) FROM items WHERE vault_id=?1 AND blob IS NOT NULL", [id.to_string()], |r| r.get(0))?;
+        let vaults: i64 = self.db.query_row("SELECT COUNT(*) FROM vaults", [], |r| r.get(0))?;
+        if used > 0 || vaults <= 1 {
+            return Err(Error::VaultNotEmpty);
+        }
+        self.db.execute("DELETE FROM items WHERE vault_id=?1", [id.to_string()])?;
+        self.db.execute("DELETE FROM vaults WHERE id=?1", [id.to_string()])?;
+        Ok(())
+    }
+
+    /// Re-encrypts an item under another vault's key.
+    pub fn move_item(&self, id: &Uuid, to: &Uuid) -> Result<()> {
+        let cur = self.get_item(id)?;
+        if &cur.vault_id == to {
+            return Ok(());
+        }
+        self.vault_key(to)?;
+        self.write_item(id, to, cur.version + 1, &cur.item)
+    }
+
+    /// New master password (and key-derivation strength). Only the vault keys and the header are
+    /// re-wrapped, in one transaction; item data is untouched. The Secret Key stays the same.
+    pub fn change_password(&mut self, current: &str, sk: &SecretKey, new_password: &str, kdf: KdfParams) -> Result<()> {
+        let h = read_header(&self.db)?.ok_or(Error::NotInitialized)?;
+        let old_kek = crypto::kek(&crypto::derive_auk(current, sk, &h.salt, h.kdf)?);
+        crypto::open(&old_kek, &h.canary, CANARY_AAD).map_err(|_| Error::WrongCredentials)?;
+        let salt = crypto::random_bytes();
+        let new_kek = crypto::kek(&crypto::derive_auk(new_password, sk, &salt, kdf)?);
+        let wrapped: Vec<(String, Vec<u8>)> = {
+            let mut stmt = self.db.prepare("SELECT id, key_blob FROM vaults")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let tx = self.db.unchecked_transaction()?;
+        for (id, blob) in wrapped {
+            let aad = vault_key_aad(&uuid(id.clone()));
+            let raw = crypto::open(&old_kek, &blob, &aad)?;
+            tx.execute("UPDATE vaults SET key_blob=?2 WHERE id=?1", params![id, crypto::seal(&new_kek, &raw, &aad)])?;
+        }
+        let header = Header { format: 1, salt, kdf, canary: crypto::seal(&new_kek, b"lockbox", CANARY_AAD) };
+        tx.execute("UPDATE meta SET v=?1 WHERE k='header'", [serde_json::to_vec(&header)?])?;
+        tx.commit()?;
+        self.kek = new_kek;
+        Ok(())
+    }
+
+    pub fn kdf_params(&self) -> Result<KdfParams> {
+        Ok(read_header(&self.db)?.ok_or(Error::NotInitialized)?.kdf)
     }
 
     fn decode(&self, id: String, vault: String, version: i64, blob: Vec<u8>) -> Result<ItemRecord> {
         let (id, vault_id, version) = (uuid(id), uuid(vault), version as u64);
         let json = crypto::open(&self.vault_key(&vault_id)?, &blob, &item_aad(&vault_id, &id, version))?;
-        Ok(ItemRecord { id, vault_id, version, item: serde_json::from_slice(&json)? })
+        Ok(ItemRecord { id, vault_id, version, item: serde_json::from_slice(&json)?, deleted_at: None })
     }
 
     pub fn get_item(&self, id: &Uuid) -> Result<ItemRecord> {
         let row = self
             .db
             .query_row(
-                "SELECT id, vault_id, version, blob FROM items WHERE id=?1 AND blob IS NOT NULL",
+                "SELECT id, vault_id, version, blob FROM items WHERE id=?1 AND blob IS NOT NULL AND deleted_at IS NULL",
                 [id.to_string()],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
@@ -400,7 +517,7 @@ impl Lockbox {
     /// All live items, optionally limited to one vault.
     pub fn items(&self, vault: Option<&Uuid>) -> Result<Vec<ItemRecord>> {
         let mut stmt = self.db.prepare(
-            "SELECT id, vault_id, version, blob FROM items WHERE blob IS NOT NULL AND (?1 IS NULL OR vault_id=?1)",
+            "SELECT id, vault_id, version, blob FROM items WHERE blob IS NOT NULL AND deleted_at IS NULL AND (?1 IS NULL OR vault_id=?1)",
         )?;
         let rows = stmt.query_map([vault.map(|v| v.to_string())], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         rows.map(|row| {
@@ -513,6 +630,12 @@ mod tests {
         assert!(matches!(lb.get_item(&gh), Err(Error::NotFound)));
         assert!(matches!(lb.delete_item(&gh), Err(Error::NotFound)));
         assert_eq!(lb.items(None).unwrap().len(), 1);
+        assert_eq!(lb.trash().unwrap()[0].item.title, "GitHub");
+        lb.restore_item(&gh).unwrap();
+        assert_eq!(lb.items(None).unwrap().len(), 2);
+        lb.delete_item(&gh).unwrap();
+        lb.purge_item(&gh).unwrap();
+        assert!(lb.trash().unwrap().is_empty() && matches!(lb.restore_item(&gh), Err(Error::NotFound)));
     }
 
     #[test]
@@ -620,6 +743,86 @@ mod tests {
         let h = lb.get_item(&id).unwrap().item.password_history;
         assert_eq!(h.len(), 20);
         assert_eq!((h[0].password.as_str(), h[19].password.as_str()), ("pw23", "pw4"));
+    }
+
+    #[test]
+    fn upgrades_a_vault_made_before_recently_deleted() {
+        let p = tmp();
+        let (lb, sk) = Lockbox::create(&p, "pw", FAST).unwrap();
+        let v = lb.vaults().unwrap()[0].id;
+        lb.add_item(&v, login("GitHub")).unwrap();
+        lb.db.execute_batch("ALTER TABLE items DROP COLUMN deleted_at").unwrap();
+        drop(lb);
+        let lb = Lockbox::unlock(&p, "pw", &sk).unwrap();
+        assert_eq!(lb.items(None).unwrap().len(), 1);
+        let id = lb.items(None).unwrap()[0].id;
+        lb.delete_item(&id).unwrap();
+        assert_eq!(lb.trash().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn trash_expires_after_30_days() {
+        let (lb, _) = Lockbox::create(&tmp(), "pw", FAST).unwrap();
+        let v = lb.vaults().unwrap()[0].id;
+        let old = lb.add_item(&v, login("Old")).unwrap();
+        let recent = lb.add_item(&v, login("Recent")).unwrap();
+        lb.delete_item(&old).unwrap();
+        lb.delete_item(&recent).unwrap();
+        lb.db.execute("UPDATE items SET deleted_at=?2 WHERE id=?1", params![old.to_string(), (now() - 31 * 86_400) as i64]).unwrap();
+        assert_eq!(lb.purge_expired().unwrap(), 1);
+        let left: Vec<String> = lb.trash().unwrap().into_iter().map(|r| r.item.title).collect();
+        assert_eq!(left, vec!["Recent"]);
+        let blob: Option<Vec<u8>> = lb.db.query_row("SELECT blob FROM items WHERE id=?1", [old.to_string()], |r| r.get(0)).unwrap();
+        assert!(blob.is_none(), "expired data is really gone");
+    }
+
+    #[test]
+    fn change_password_rewraps_keys_only() {
+        let p = tmp();
+        let (mut lb, sk) = Lockbox::create(&p, "old password", FAST).unwrap();
+        let work = lb.create_vault("Work").unwrap();
+        lb.add_item(&work, login("GitHub")).unwrap();
+        assert!(matches!(lb.change_password("wrong", &sk, "new password", FAST), Err(Error::WrongCredentials)));
+        let stronger = KdfParams { m_kib: 128, t: 2, p: 1 };
+        lb.change_password("old password", &sk, "new password", stronger).unwrap();
+        assert_eq!(lb.items(None).unwrap()[0].item.title, "GitHub", "same session keeps working");
+        assert_eq!(lb.kdf_params().unwrap(), stronger);
+        drop(lb);
+        assert!(matches!(Lockbox::unlock(&p, "old password", &sk), Err(Error::WrongCredentials)));
+        let lb = Lockbox::unlock(&p, "new password", &sk).unwrap();
+        assert_eq!(lb.items(Some(&work)).unwrap()[0].item.password.as_deref(), Some("hunter2"));
+        assert_eq!(lb.vaults().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn vaults_rename_move_delete() {
+        let (lb, _) = Lockbox::create(&tmp(), "pw", FAST).unwrap();
+        let personal = lb.vaults().unwrap()[0].id;
+        let work = lb.create_vault("Wrok").unwrap();
+        lb.rename_vault(&work, "Work").unwrap();
+        assert!(lb.vaults().unwrap().iter().any(|v| v.name == "Work"));
+        let id = lb.add_item(&work, login("Jira")).unwrap();
+        assert!(matches!(lb.delete_vault(&work), Err(Error::VaultNotEmpty)));
+        lb.move_item(&id, &personal).unwrap();
+        let moved = lb.get_item(&id).unwrap();
+        assert_eq!((moved.vault_id, moved.item.password.as_deref()), (personal, Some("hunter2")));
+        lb.delete_vault(&work).unwrap();
+        assert_eq!(lb.vaults().unwrap().len(), 1);
+        assert!(matches!(lb.delete_vault(&personal), Err(Error::VaultNotEmpty)), "never the last vault");
+    }
+
+    #[test]
+    fn restore_an_old_password() {
+        let (lb, _) = Lockbox::create(&tmp(), "pw", FAST).unwrap();
+        let v = lb.vaults().unwrap()[0].id;
+        let id = lb.add_item(&v, login("GitHub")).unwrap();
+        let mut it = lb.get_item(&id).unwrap().item;
+        it.password = Some("new-one".into());
+        lb.update_item(&id, it).unwrap();
+        lb.restore_old_password(&id, 0).unwrap();
+        let it = lb.get_item(&id).unwrap().item;
+        assert_eq!(it.password.as_deref(), Some("hunter2"));
+        assert_eq!(it.password_history.iter().map(|c| c.password.as_str()).collect::<Vec<_>>(), vec!["new-one"]);
     }
 
     #[test]

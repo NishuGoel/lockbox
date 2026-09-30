@@ -1,7 +1,7 @@
 const root = document.getElementById('root');
 const LEN = { random: [8, 64, 20], memorable: [3, 12, 5], pin: [4, 12, 6] };
 const S = {
-  screen: 'loading', items: [], vaults: [], filter: 'all', view: 'items', sel: null, revealed: {}, needSk: false, sk: null,
+  screen: 'loading', items: [], vaults: [], trash: [], filter: 'all', view: 'items', sel: null, revealed: {}, needSk: false, sk: null,
   palette: null, editor: null, importer: null, settings: null, sheet: null, nudged: false, restore: null, gen: { mode: 'random', len: 20, digits: true, symbols: true, easy: false, value: '' },
 };
 let focusAfter = null;
@@ -15,7 +15,7 @@ async function boot() {
 }
 
 async function load() {
-  [S.items, S.vaults, S.settings] = await Promise.all([invoke('items'), invoke('vaults'), invoke('settings_get')]);
+  [S.items, S.vaults, S.settings, S.trash] = await Promise.all([invoke('items'), invoke('vaults'), invoke('settings_get'), invoke('trash_list')]);
   if (!S.nudged) {
     // one gentle prompt per unlock: backups first, then the monthly Emergency Kit check
     S.nudged = true;
@@ -144,8 +144,8 @@ function app() {
     h('div', { class: 'spacer', 'data-tauri-drag-region': true }),
     h('button', { class: 'btn primary sm', onClick: () => openEditor() }, icon('plus'), 'New item'),
     h('button', { class: 'icon-btn', 'aria-label': 'Lock lockbox', title: 'Lock (⌘L)', onClick: () => invoke('lock') }, icon('lock', 17)));
-  const wide = S.view === 'generator' || S.view === 'settings';
-  const main = S.view === 'generator' ? [generator()] : S.view === 'settings' ? [settingsView()] : [list(), detail()];
+  const wide = ['generator', 'settings', 'trash'].includes(S.view);
+  const main = S.view === 'generator' ? [generator()] : S.view === 'settings' ? [settingsView()] : S.view === 'trash' ? [trashView()] : [list(), detail()];
   return [h('div', { class: 'app fade' }, top, h('div', { class: 'body' + (wide ? ' wide' : '') }, side(), ...main))];
 }
 
@@ -159,11 +159,16 @@ function side() {
     nav('all', 'All items', 'grid', S.items.length),
     nav('fav', 'Favorites', 'star', S.items.filter((i) => i.favorite).length),
     nav('generator', 'Generator', 'spark'),
+    h('button', { class: 'nav' + (S.view === 'trash' ? ' on' : ''), onClick: async () => { S.view = 'trash'; await load(); render(); } },
+      icon('trash', 17), 'Recently deleted', S.trash.length > 0 && h('span', { class: 'count' }, S.trash.length)),
     h('button', { class: 'nav', onClick: openImporter }, icon('download', 17), 'Import'),
     h('button', { class: 'nav' + (S.view === 'settings' ? ' on' : ''), onClick: async () => { S.view = 'settings'; S.settings = await invoke('settings_get'); render(); } }, icon('gear', 17), 'Settings'),
-    h('div', { class: 'section' }, 'Vaults'),
-    S.vaults.map((v) => h('button', { class: 'nav' + (S.view === 'items' && S.filter === v.id ? ' on' : ''), onClick: () => { S.view = 'items'; S.filter = v.id; S.sel = null; load().then(render); } },
-      h('span', { class: 'dot', hue: hue(v.name) }), v.name, h('span', { class: 'count' }, S.items.filter((i) => i.vaultId === v.id).length))),
+    h('div', { class: 'section-row' }, h('div', { class: 'section' }, 'Vaults'),
+      h('button', { class: 'add', 'aria-label': 'New vault', title: 'New vault', onClick: () => { S.sheet = { kind: 'vault-new' }; render(); } }, icon('plus', 14))),
+    S.vaults.map((v) => h('div', { class: 'vrow' },
+      h('button', { class: 'nav' + (S.view === 'items' && S.filter === v.id ? ' on' : ''), onClick: () => { S.view = 'items'; S.filter = v.id; S.sel = null; load().then(render); } },
+        h('span', { class: 'dot', hue: hue(v.name) }), v.name, h('span', { class: 'count' }, S.items.filter((i) => i.vaultId === v.id).length)),
+      h('button', { class: 'vmore', 'aria-label': 'Edit vault ' + v.name, title: 'Rename or delete', onClick: () => { S.sheet = { kind: 'vault-edit', vault: v }; render(); } }, icon('more', 16)))),
     tags.length > 0 && h('div', { class: 'section' }, 'Tags'),
     tags.length > 0 && h('div', { class: 'tags' }, tags.map((t) => h('button', { class: 'tag' + (S.filter === 'tag:' + t ? ' on' : ''), onClick: () => { S.view = 'items'; S.filter = S.filter === 'tag:' + t ? 'all' : 'tag:' + t; S.sel = null; load().then(render); } }, '#' + t))),
     backupFoot());
@@ -234,7 +239,9 @@ function detail() {
   }
   if (it.passkey) rows.push(fieldRow('passkey', h('span', { class: 'v' }, `${it.passkey.userName || 'account'} · ${it.passkey.rpId}`),
     h('span', { class: 'faint' }, 'added ' + ago(it.passkey.createdAt))));
-  if (it.historyCount) rows.push(fieldRow('previous passwords', h('span', { class: 'v muted' }, `${it.historyCount} older password${it.historyCount === 1 ? '' : 's'} kept`)));
+  if (it.historyCount) rows.push(h('div', { class: 'f link-row', role: 'button', tabindex: '0', onClick: () => openHistory(it.id), onKeydown: (e) => e.key === 'Enter' && openHistory(it.id) },
+    h('div', { class: 'kv' }, h('span', { class: 'k' }, 'previous passwords'), h('span', { class: 'v muted' }, `${it.historyCount} older password${it.historyCount === 1 ? '' : 's'}`)),
+    h('span', { class: 'faint' }, 'View ›')));
   for (const u of it.urls) rows.push(fieldRow('website', h('span', { class: 'v' }, u), copyBtn('Copy website', async () => { await invoke('copy_text', { text: u }); toast('Website copied', null); })));
   for (const [name, value] of it.fields) {
     const shown = value ?? S.revealed[name];
@@ -245,8 +252,7 @@ function detail() {
   if (it.notes) rows.push(fieldRow('notes', h('span', { class: 'v notes' }, it.notes)));
 
   const del = h('button', { class: 'btn sm', onClick: async () => {
-    if (!del.classList.contains('danger')) { del.classList.add('danger'); del.textContent = 'Click again to delete'; setTimeout(() => { del.classList.remove('danger'); del.replaceChildren(icon('trash'), 'Delete'); }, 3000); return; }
-    await invoke('delete_item', { id: it.id }); S.sel = null; await load(); render(); toast('Deleted ' + it.title, null);
+    await invoke('delete_item', { id: it.id }); S.sel = null; await load(); render(); toast(`Moved ${it.title} to Recently deleted`, 'restorable for 30 days');
   } }, icon('trash'), 'Delete');
 
   return h('section', { class: 'detail' }, h('div', { class: 'detail-in fade' },
@@ -399,7 +405,8 @@ function palette() {
 
 async function openEditor(id) {
   const item = id ? await invoke('get_item', { id }) : { kind: 'login', title: '', username: null, password: null, urls: [], notes: null, totp: null, tags: [], fields: [], favorite: false };
-  S.editor = { id: id ?? null, item, vaultId: S.vaults.find((v) => v.id === S.filter)?.id ?? S.vaults[0]?.id };
+  const own = id && S.items.find((i) => i.id === id)?.vaultId;
+  S.editor = { id: id ?? null, item, vaultId: own || S.vaults.find((v) => v.id === S.filter)?.id || S.vaults[0]?.id };
   focusAfter = 'ed-title';
   render();
 }
@@ -420,7 +427,7 @@ function editor() {
   const [otp, otpF] = inp('ed-totp', '2FA secret (optional)', item.totp, { mono: true, placeholder: 'Setup key or otpauth:// link' });
   const [tags, tagsF] = inp('ed-tags', 'Tags', item.tags.join(', '), { placeholder: 'work, finance' });
   const notes = h('textarea', { class: 'input', id: 'ed-notes', value: item.notes ?? '' });
-  const vault = !id && S.vaults.length > 1 && h('select', { class: 'input', id: 'ed-vault', onChange: (e) => (S.editor.vaultId = e.target.value) },
+  const vault = S.vaults.length > 1 && h('select', { class: 'input', id: 'ed-vault', onChange: (e) => (S.editor.vaultId = e.target.value) },
     S.vaults.map((v) => { const o = h('option', { value: v.id }, v.name); o.selected = v.id === S.editor.vaultId; return o; }));
   const err = h('p', { class: 'error', role: 'alert' });
   const opt = (s) => (s.trim() ? s.trim() : null);
@@ -553,6 +560,11 @@ function settingsView() {
         h('button', { class: 'btn sm', onClick: () => { S.sheet = { kind: 'reveal' }; render(); } }, icon('key'), 'Show Secret Key')),
       h('p', { class: 'faint' }, st.lastRecoveryCheck ? 'Last checked ' + ago(st.lastRecoveryCheck) + ' · lockbox asks again every 30 days' : 'Not checked yet')),
 
+    h('div', { class: 'sec' }, h('h2', {}, 'Master password'),
+      h('div', { class: 'sec-row' },
+        h('span', { class: 'grow muted' }, 'Change it any time. Your Secret Key stays the same, and lockbox uses today’s recommended encryption strength for the new one.'),
+        h('button', { class: 'btn sm', onClick: () => { S.sheet = { kind: 'passwd' }; render(); } }, icon('key'), 'Change…'))),
+
     h('div', { class: 'sec' }, h('h2', {}, 'Export & restore'),
       h('div', { class: 'sec-row' },
         h('span', { class: 'grow muted' }, 'A CSV that Apple Passwords, Chrome, Bitwarden, 1Password or lockbox can import. It’s plain text: delete it once you’re done.'),
@@ -567,6 +579,36 @@ function settingsView() {
         h('div', {}, h('b', {}, 'If this Mac is stolen'), 'The file can’t be opened without your master password and Secret Key. lockbox locks when the screen locks.'),
         h('div', {}, h('b', {}, 'If a backup leaks'), 'Useless without the Secret Key, even with a weak master password. That’s what cracked LastPass vaults lacked.'),
         h('div', {}, h('b', {}, 'If you forget the master password'), 'Your data is gone for good. That’s the price of nobody else being able to get in. Keep your Emergency Kit safe.')))));
+}
+
+// ---------- recently deleted ----------
+
+function trashView() {
+  const DAY = 86400;
+  const left = (t) => Math.max(0, 30 - Math.floor((Date.now() / 1000 - t) / DAY));
+  const empty = h('button', { class: 'btn sm', onClick: async () => {
+    if (!empty.classList.contains('danger')) { empty.classList.add('danger'); empty.textContent = 'Click again to wipe everything here'; setTimeout(() => { empty.classList.remove('danger'); empty.textContent = 'Empty'; }, 3000); return; }
+    const n = await invoke('empty_trash'); await load(); render(); toast(`Wiped ${n} item${n === 1 ? '' : 's'} for good`, null);
+  } }, 'Empty');
+  return h('section', { class: 'gen' }, h('div', { class: 'gen-in fade' },
+    h('div', { class: 'head-row' }, h('div', {}, h('h1', {}, 'Recently deleted'), h('p', { class: 'muted' }, 'Deleted items wait here for 30 days, then their data is wiped for good.')), S.trash.length > 0 && empty),
+    S.trash.length
+      ? h('div', { class: 'trows' }, S.trash.map((t) => {
+          const wipe = h('button', { class: 'btn sm', onClick: async () => {
+            if (!wipe.classList.contains('danger')) { wipe.classList.add('danger'); wipe.textContent = 'Click again'; setTimeout(() => { wipe.classList.remove('danger'); wipe.textContent = 'Delete now'; }, 3000); return; }
+            await invoke('purge_item', { id: t.id }); await load(); render(); toast(`${t.title} wiped for good`, null);
+          } }, 'Delete now');
+          return h('div', { class: 'trow' }, tile(t.title, 's'),
+            h('div', { class: 'grow' }, h('span', {}, t.title), h('span', { class: 'faint' }, `${t.username ? t.username + ' · ' : ''}deleted ${ago(t.deletedAt)} · wiped in ${left(t.deletedAt)} day${left(t.deletedAt) === 1 ? '' : 's'}`)),
+            h('button', { class: 'btn sm', onClick: async () => { await invoke('restore_item', { id: t.id }); await load(); render(); toast(`Restored ${t.title}`, null); } }, icon('undo'), 'Restore'),
+            wipe);
+        }))
+      : h('div', { class: 'empty' }, h('p', {}, 'Nothing here. Deleted items show up here for 30 days.'))));
+}
+
+async function openHistory(id) {
+  S.sheet = { kind: 'history', id, dates: await invoke('history_list', { id }), shown: {} };
+  render();
 }
 
 function closeSheet() { S.sheet = null; render(); }
@@ -631,6 +673,65 @@ function sheet() {
       h('p', { class: 'muted' }, 'The CSV holds every password in plain text. Anyone who gets the file can read them. Passkeys can’t go in a CSV; your backups include them.'),
       h('div', { class: 'field' }, h('label', { for: 'ex-pw' }, 'Master password'), pw), err,
       h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), h('button', { class: 'btn primary', onClick: go }, 'Export…'))];
+  } else if (K.kind === 'vault-new' || K.kind === 'vault-edit') {
+    const say = (m) => { err.textContent = String(m); };
+    const editing = K.kind === 'vault-edit';
+    const name = h('input', { class: 'input', id: 'vn-name', value: editing ? K.vault.name : '', placeholder: 'e.g. Work, Family, Finance', onKeydown: (e) => e.key === 'Enter' && save() });
+    async function save() {
+      try {
+        if (editing) { await invoke('vault_rename', { id: K.vault.id, name: name.value }); toast('Vault renamed', null); }
+        else { const id = await invoke('vault_create', { name: name.value }); S.view = 'items'; S.filter = id; toast('Vault created', null); }
+        S.sheet = null; await load(); render();
+      } catch (e) { say(e); }
+    }
+    const count = editing ? S.items.filter((i) => i.vaultId === K.vault.id).length + S.trash.filter((t) => t.vaultId === K.vault.id).length : 0;
+    focusAfter = 'vn-name';
+    body = [h('h2', {}, editing ? 'Edit vault' : 'New vault'),
+      h('div', { class: 'field' }, h('label', { for: 'vn-name' }, 'Name'), name),
+      editing && h('div', { class: 'sec-row' },
+        h('span', { class: 'grow faint' }, count ? `Holds ${count} item${count === 1 ? '' : 's'} (incl. Recently deleted). Move or delete them to remove this vault.` : S.vaults.length < 2 ? 'lockbox always keeps at least one vault.' : 'This vault is empty.'),
+        h('button', { class: 'btn sm danger', disabled: !!count || S.vaults.length < 2, onClick: async () => {
+          try { await invoke('vault_delete', { id: K.vault.id }); if (S.filter === K.vault.id) S.filter = 'all'; S.sheet = null; await load(); render(); toast('Vault deleted', null); } catch (e) { say(e); }
+        } }, icon('trash'), 'Delete vault')),
+      err,
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), h('button', { class: 'btn primary', onClick: save }, editing ? 'Save' : 'Create vault'))];
+  } else if (K.kind === 'history') {
+    const it = S.items.find((i) => i.id === K.id);
+    body = [h('h2', {}, 'Previous passwords'), h('p', { class: 'muted' }, `Older passwords for ${it?.title ?? 'this item'}, newest first. Handy if a password change didn’t go through.`),
+      h('div', { class: 'trows' }, K.dates.map((d, n) => h('div', { class: 'trow' },
+        h('div', { class: 'grow' }, K.shown[n] != null ? h('span', { class: 'mono' }, pwChars(K.shown[n])) : h('span', { class: 'muted' }, '••••••••••••'), h('span', { class: 'faint' }, 'replaced ' + ago(d))),
+        h('button', { class: 'icon-btn', 'aria-label': K.shown[n] != null ? 'Hide' : 'Reveal', onClick: async () => { if (K.shown[n] != null) delete K.shown[n]; else K.shown[n] = await invoke('history_reveal', { id: K.id, index: n }); render(); } }, icon('eye', 18)),
+        h('button', { class: 'icon-btn', 'aria-label': 'Copy', onClick: async () => { await invoke('history_copy', { id: K.id, index: n }); toast('Old password copied'); } }, icon('copy', 17)),
+        h('button', { class: 'btn sm', onClick: async () => {
+          try { await invoke('history_restore', { id: K.id, index: n }); await load(); S.revealed = {}; S.sheet = null; render(); toast('Password restored', 'the replaced one is in history'); } catch (e) { say(e); }
+        } }, 'Use this')))),
+      err,
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', onClick: closeSheet }, 'Done'))];
+  } else if (K.kind === 'passwd') {
+    const say = (m) => { err.textContent = String(m); };
+    const cur = pwField('pw-cur', () => nw.focus());
+    const nw = pwField('pw-new', () => rep.focus());
+    const rep = pwField('pw-rep', () => go());
+    const btn = h('button', { class: 'btn primary', onClick: () => go() }, 'Change password');
+    async function go() {
+      if (nw.value.length < 10) return say('Use at least 10 characters. A long phrase is easiest to remember.');
+      if (nw.value !== rep.value) return say('The new passwords don’t match.');
+      if (nw.value === cur.value) return say('That’s the same as your current password.');
+      btn.disabled = true; btn.textContent = 'Changing…';
+      try {
+        const backedUp = await invoke('change_password', { current: cur.value, new: nw.value });
+        S.sheet = null; render(); await refreshSettings();
+        toast('Master password changed', backedUp ? 'fresh backup made' : 'back up now: old backups use the old password');
+      } catch (e) { btn.disabled = false; btn.textContent = 'Change password'; say(e); }
+    }
+    focusAfter = 'pw-cur';
+    body = [h('h2', {}, 'Change master password'),
+      h('p', { class: 'muted' }, 'Your Secret Key stays the same. Backups made before today keep opening only with your old password, so lockbox makes a fresh one right after.'),
+      h('div', { class: 'field' }, h('label', { for: 'pw-cur' }, 'Current master password'), cur),
+      h('div', { class: 'field' }, h('label', { for: 'pw-new' }, 'New master password'), nw),
+      h('div', { class: 'field' }, h('label', { for: 'pw-rep' }, 'Repeat new password'), rep),
+      err,
+      h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), btn)];
   } else if (K.kind === 'restore') {
     const pw = pwField('rr-pw', () => go());
     async function go() {

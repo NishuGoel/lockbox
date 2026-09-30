@@ -90,7 +90,15 @@ enum Cmd {
         #[arg(long)]
         password: bool,
     },
-    /// Delete an item
+    /// Show Recently deleted (items are wiped for good after 30 days)
+    Trash,
+    /// Bring an item back from Recently deleted
+    Undelete { query: String },
+    /// Move an item to another vault
+    Mv { query: String, vault: String },
+    /// Change your master password
+    Passwd,
+    /// Move an item to Recently deleted
     Rm {
         query: String,
         #[arg(short, long)]
@@ -136,6 +144,9 @@ enum Cmd {
 #[derive(Subcommand)]
 enum VaultCmd {
     Add { name: String },
+    Rename { name: String, new_name: String },
+    /// delete an empty vault
+    Rm { name: String },
 }
 
 #[derive(clap::Args)]
@@ -479,6 +490,22 @@ fn run(cmd: Cmd) -> R<()> {
             }
             println!("\nThe export file holds your passwords in plain text. Delete it now:\n  rm {:?}", file);
         }
+        Cmd::Passwd => {
+            if agent::is_running(&p.sock) {
+                agent::call(&p.sock, &Request::Lock)?;
+            }
+            let (mut lb, current, sk) = unlock_interactive(&p)?;
+            let new = prompt_hidden("New master password: ")?;
+            if new.chars().count() < 10 {
+                return Err("use at least 10 characters; a long phrase is easiest to remember".into());
+            }
+            if *prompt_hidden("Repeat it: ")? != *new {
+                return Err("passwords didn't match".into());
+            }
+            lb.change_password(&current, &sk, &new, KdfParams::default())?;
+            println!("Master password changed. Your Secret Key stays the same.");
+            println!("Backups made before now still open with the OLD password; run `lockbox backup` for a fresh one.");
+        }
         cmd => {
             let s = Session::open(&p)?;
             match cmd {
@@ -490,6 +517,37 @@ fn run(cmd: Cmd) -> R<()> {
                 Cmd::Vaults { cmd: Some(VaultCmd::Add { name }) } => {
                     s.call::<Uuid>(Request::CreateVault { name: name.clone() })?;
                     println!("Created vault {name}.");
+                }
+                Cmd::Vaults { cmd: Some(VaultCmd::Rename { name, new_name }) } => {
+                    let v = s.vault(Some(&name))?;
+                    s.call::<()>(Request::RenameVault { id: v.id, name: new_name.clone() })?;
+                    println!("Renamed {} to {new_name}.", v.name);
+                }
+                Cmd::Vaults { cmd: Some(VaultCmd::Rm { name }) } => {
+                    let v = s.vault(Some(&name))?;
+                    s.call::<()>(Request::DeleteVault { id: v.id })?;
+                    println!("Deleted vault {}.", v.name);
+                }
+                Cmd::Trash => {
+                    let items: Vec<ItemRecord> = s.call(Request::Trash)?;
+                    for r in &items {
+                        let left = lockbox_core::TRASH_DAYS.saturating_sub((backup::now() - r.deleted_at.unwrap_or(0)) / 86_400);
+                        println!("{:<32} {:<32} wiped in {left} days", r.item.title, r.item.username.as_deref().unwrap_or(""));
+                    }
+                    if items.is_empty() {
+                        println!("Recently deleted is empty.");
+                    }
+                }
+                Cmd::Undelete { query } => {
+                    let items: Vec<ItemRecord> = s.call(Request::Trash)?;
+                    let r = resolve(&items, &query)?;
+                    s.call::<()>(Request::Restore { id: r.id })?;
+                    println!("Restored {}.", r.item.title);
+                }
+                Cmd::Mv { query, vault } => {
+                    let (r, v) = (s.find(&query)?, s.vault(Some(&vault))?);
+                    s.call::<()>(Request::Move { id: r.id, vault: v.id })?;
+                    println!("Moved {} to {}.", r.item.title, v.name);
                 }
                 Cmd::Ls { query, vault } => {
                     let vaults: Vec<Vault> = s.call(Request::Vaults)?;
@@ -554,7 +612,7 @@ fn run(cmd: Cmd) -> R<()> {
                     let r = s.find(&query)?;
                     if yes || confirm(&format!("Delete {}?", r.item.title))? {
                         s.call::<()>(Request::Delete { id: r.id })?;
-                        println!("Deleted {}.", r.item.title);
+                        println!("Moved {} to Recently deleted (`lockbox undelete` brings it back).", r.item.title);
                     }
                 }
                 _ => unreachable!("handled above"),
@@ -584,6 +642,7 @@ mod tests {
             vault_id: Uuid::nil(),
             version: 1,
             item: Item { title: title.into(), username: Some(user.into()), ..Default::default() },
+            deleted_at: None,
         }
     }
 

@@ -364,7 +364,13 @@ fn save_item(s: S, id: Option<Uuid>, vault_id: Option<Uuid>, item: Item) -> Res<
         totp::parse(t).map_err(|_| "That 2FA secret isn't valid. Paste the setup key or otpauth:// link.")?;
     }
     s.with(|lb| match id {
-        Some(id) => lb.update_item(&id, item).map(|_| id),
+        Some(id) => {
+            lb.update_item(&id, item)?;
+            if let Some(v) = vault_id {
+                lb.move_item(&id, &v)?;
+            }
+            Ok(id)
+        }
         None => {
             let vault = match vault_id {
                 Some(v) => v,
@@ -378,6 +384,115 @@ fn save_item(s: S, id: Option<Uuid>, vault_id: Option<Uuid>, item: Item) -> Res<
 #[tauri::command]
 fn delete_item(s: S, id: Uuid) -> Res<()> {
     s.with(|lb| lb.delete_item(&id))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrashView {
+    id: Uuid,
+    vault_id: Uuid,
+    title: String,
+    username: Option<String>,
+    deleted_at: u64,
+}
+
+#[tauri::command]
+fn trash_list(s: S) -> Res<Vec<TrashView>> {
+    Ok(s.with(|lb| lb.trash())?
+        .into_iter()
+        .map(|r| TrashView { id: r.id, vault_id: r.vault_id, title: r.item.title, username: r.item.username, deleted_at: r.deleted_at.unwrap_or(0) })
+        .collect())
+}
+
+#[tauri::command]
+fn restore_item(s: S, id: Uuid) -> Res<()> {
+    s.with(|lb| lb.restore_item(&id))
+}
+
+#[tauri::command]
+fn purge_item(s: S, id: Uuid) -> Res<()> {
+    s.with(|lb| lb.purge_item(&id))
+}
+
+#[tauri::command]
+fn empty_trash(s: S) -> Res<usize> {
+    s.with(|lb| {
+        let all = lb.trash()?;
+        for r in &all {
+            lb.purge_item(&r.id)?;
+        }
+        Ok(all.len())
+    })
+}
+
+#[tauri::command]
+fn vault_create(s: S, name: String) -> Res<Uuid> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give the vault a name.".into());
+    }
+    s.with(|lb| lb.create_vault(name))
+}
+
+#[tauri::command]
+fn vault_rename(s: S, id: Uuid, name: String) -> Res<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give the vault a name.".into());
+    }
+    s.with(|lb| lb.rename_vault(&id, name))
+}
+
+#[tauri::command]
+fn vault_delete(s: S, id: Uuid) -> Res<()> {
+    s.with(|lb| lb.delete_vault(&id))
+}
+
+/// Dates only; values come one at a time via `history_reveal`.
+#[tauri::command]
+fn history_list(s: S, id: Uuid) -> Res<Vec<u64>> {
+    Ok(s.with(|lb| lb.get_item(&id))?.item.password_history.iter().map(|c| c.replaced_at).collect())
+}
+
+fn history_value(s: &Shared, id: Uuid, index: usize) -> Res<String> {
+    s.with(|lb| lb.get_item(&id))?.item.password_history.get(index).map(|c| c.password.clone()).ok_or_else(|| "not found".into())
+}
+
+#[tauri::command]
+fn history_reveal(s: S, id: Uuid, index: usize) -> Res<String> {
+    history_value(&s, id, index)
+}
+
+#[tauri::command]
+fn history_copy(s: S, id: Uuid, index: usize) -> Res<()> {
+    copy_concealed(&Zeroizing::new(history_value(&s, id, index)?));
+    Ok(())
+}
+
+#[tauri::command]
+fn history_restore(s: S, id: Uuid, index: usize) -> Res<()> {
+    s.with(|lb| lb.restore_old_password(&id, index))
+}
+
+/// New master password (with today's key-derivation strength). Takes a fresh backup right after,
+/// since older backups still open only with the old password.
+#[tauri::command]
+async fn change_password(s: S<'_>, current: String, new: String) -> Res<bool> {
+    let (current, new) = (Zeroizing::new(current), Zeroizing::new(new));
+    if new.chars().count() < 10 {
+        return Err("Use at least 10 characters. A long phrase is easiest to remember.".into());
+    }
+    let sk = SecretKey::parse(&mac::load_secret_key(&s.account())?.ok_or("no Secret Key on this Mac")?).map_err(err)?;
+    {
+        let mut g = s.lb.lock().unwrap();
+        let lb = g.as_mut().ok_or("locked")?;
+        lb.change_password(&current, &sk, &new, KdfParams::default()).map_err(|e| match e {
+            lockbox_core::Error::WrongCredentials => "Your current master password isn't right.".to_string(),
+            e => e.to_string(),
+        })?;
+    }
+    s.touch();
+    Ok(s.settings().auto_backup && s.backup().is_ok())
 }
 
 #[derive(Serialize)]
@@ -653,6 +768,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             status, create, unlock, lock, activity, vaults, items, get_item, reveal, totp_code, copy, copy_text, generate,
             save_item, delete_item, import_pick, import_run, delete_import_file, settings_get, backup_set, backup_choose_dir, backup_run,
+            trash_list, restore_item, purge_item, empty_trash, vault_create, vault_rename, vault_delete,
+            history_list, history_reveal, history_copy, history_restore, change_password,
             recovery_verify, recovery_snooze, reveal_secret_key, export_csv, restore_pick, restore, hide_quick, open_main
         ])
         .build(tauri::generate_context!())

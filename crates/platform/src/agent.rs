@@ -24,6 +24,12 @@ pub enum Request {
     Update { id: Uuid, item: Item },
     Delete { id: Uuid },
     Import { items: Vec<lockbox_core::import::Imported>, vault: Option<Uuid> },
+    Trash,
+    Restore { id: Uuid },
+    Purge { id: Uuid },
+    Move { id: Uuid, vault: Uuid },
+    RenameVault { id: Uuid, name: String },
+    DeleteVault { id: Uuid },
     Lock,
 }
 
@@ -38,6 +44,12 @@ pub fn handle(lb: &Lockbox, req: Request) -> Response {
         Request::Update { id, item } => lb.update_item(&id, item).map(|_| Value::Null),
         Request::Delete { id } => lb.delete_item(&id).map(|_| Value::Null),
         Request::Import { items, vault } => lb.import(items, vault.as_ref()).map(|v| json!(v)),
+        Request::Trash => lb.trash().map(|v| json!(v)),
+        Request::Restore { id } => lb.restore_item(&id).map(|_| Value::Null),
+        Request::Purge { id } => lb.purge_item(&id).map(|_| Value::Null),
+        Request::Move { id, vault } => lb.move_item(&id, &vault).map(|_| Value::Null),
+        Request::RenameVault { id, name } => lb.rename_vault(&id, &name).map(|_| Value::Null),
+        Request::DeleteVault { id } => lb.delete_vault(&id).map(|_| Value::Null),
         Request::Lock => Ok(Value::Null),
     };
     r.map_err(|e| e.to_string())
