@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod backup;
 pub mod mac;
+pub mod native;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
