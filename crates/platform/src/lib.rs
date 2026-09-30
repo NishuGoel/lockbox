@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod backup;
 pub mod mac;
 
 use std::os::unix::fs::PermissionsExt;
