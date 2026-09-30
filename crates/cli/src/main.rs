@@ -1,13 +1,11 @@
-mod agent;
-mod mac;
-
 use std::io::{BufRead, Write};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
-use agent::Request;
+use lockbox_platform::agent::{self, Request};
+use lockbox_platform::mac;
 use clap::{Parser, Subcommand};
 use lockbox_core::generator::{self, PasswordOpts};
 use lockbox_core::{Item, ItemRecord, KdfParams, Kind, Lockbox, SecretKey, Vault, totp};
@@ -148,12 +146,7 @@ struct Paths {
 
 impl Paths {
     fn new() -> R<Self> {
-        let dir = match std::env::var_os("LOCKBOX_DIR") {
-            Some(d) => PathBuf::from(d),
-            None => std::env::home_dir().ok_or("no home directory")?.join("Library/Application Support/lockbox"),
-        };
-        std::fs::create_dir_all(&dir)?;
-        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+        let dir = lockbox_platform::data_dir()?;
         Ok(Self { db: dir.join("lockbox.db"), sock: dir.join("agent.sock") })
     }
 
@@ -244,14 +237,9 @@ fn resolve<'a>(items: &'a [ItemRecord], q: &str) -> Result<&'a ItemRecord, Strin
 
 fn field(item: &Item, name: &str) -> R<String> {
     let v = match name.to_lowercase().as_str() {
-        "password" => item.password.clone(),
-        "username" => item.username.clone(),
-        "url" => item.urls.first().cloned(),
-        "notes" => item.notes.clone(),
-        "title" => Some(item.title.clone()),
         "totp" | "otp" => item.totp.as_deref().map(totp::current).transpose()?.map(|c| c.code),
         "json" => Some(serde_json::to_string_pretty(item)?),
-        n => item.fields.iter().find(|f| f.name.eq_ignore_ascii_case(n)).map(|f| f.value.clone()),
+        n => item.field(n),
     };
     v.ok_or_else(|| format!("'{}' has no {name}", item.title).into())
 }
@@ -383,7 +371,8 @@ fn run(cmd: Cmd) -> R<()> {
             let sk = SecretKey::parse(&Zeroizing::new(lines.next().ok_or("no secret key")??))?;
             let lb = Lockbox::unlock(&p.db, &pw, &sk)?;
             drop((pw, sk));
-            agent::serve(lb, &p.sock, Duration::from_secs(minutes * 60))?;
+            // lb moves into the handler and is dropped (zeroized) when serve returns
+            agent::serve(&p.sock, Some(Duration::from_secs(minutes * 60)), move |r| agent::handle(&lb, r))?;
         }
         Cmd::ClearClipboard { change_count } => {
             std::thread::sleep(Duration::from_secs(CLEAR_SECS));
@@ -541,7 +530,7 @@ mod tests {
         let (lb, _) = Lockbox::create(&dir.join("t.db"), "pw", KdfParams { m_kib: 64, t: 1, p: 1 }).unwrap();
         let sock = dir.join("s");
         let s2 = sock.clone();
-        let t = std::thread::spawn(move || agent::serve(lb, &s2, Duration::from_secs(60)).unwrap());
+        let t = std::thread::spawn(move || agent::serve(&s2, None, move |r| agent::handle(&lb, r)).unwrap());
         while !agent::is_running(&sock) {
             std::thread::sleep(Duration::from_millis(10));
         }

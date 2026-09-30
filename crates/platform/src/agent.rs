@@ -1,6 +1,5 @@
-//! Unlock agent: holds an unlocked Lockbox in memory, serves one JSON request per connection
-//! over a 0600 Unix socket, checks the peer's UID, and exits after an idle timeout (SPEC §6).
-//! The desktop app will host this same protocol in M3.
+//! Unlock agent protocol (SPEC §6): one JSON request per connection over a 0600 Unix socket,
+//! peer UID checked. Hosted by `lockbox unlock` or by the desktop app while it is unlocked.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
@@ -64,7 +63,9 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-pub fn serve(lb: Lockbox, sock: &Path, idle: Duration) -> std::io::Result<()> {
+/// Serves until a `Lock` request (or `idle` passes with no requests). `handle` owns the vault;
+/// it also receives the `Lock` so the owner can drop its keys.
+pub fn serve(sock: &Path, idle: Option<Duration>, mut handle: impl FnMut(Request) -> Response) -> std::io::Result<()> {
     if sock.exists() && !is_running(sock) {
         std::fs::remove_file(sock)?;
     }
@@ -72,15 +73,16 @@ pub fn serve(lb: Lockbox, sock: &Path, idle: Duration) -> std::io::Result<()> {
     std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))?;
 
     let last = Arc::new(AtomicU64::new(now()));
-    let (l, path) = (last.clone(), sock.to_path_buf());
-    // ponytail: process exit frees the key; zeroize-on-exit would need a shutdown channel, add if it matters
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(5));
-        if now() - l.load(Ordering::Relaxed) > idle.as_secs() {
-            let _ = std::fs::remove_file(&path);
-            std::process::exit(0);
-        }
-    });
+    if let Some(idle) = idle {
+        let (l, path) = (last.clone(), sock.to_path_buf());
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(5));
+            if now() - l.load(Ordering::Relaxed) > idle.as_secs() {
+                let _ = call(&path, &Request::Lock);
+                return;
+            }
+        });
+    }
 
     for stream in listener.incoming() {
         let Ok(mut s) = stream else { continue };
@@ -92,10 +94,11 @@ pub fn serve(lb: Lockbox, sock: &Path, idle: Duration) -> std::io::Result<()> {
         if BufReader::new(&s).read_line(&mut line).is_err() {
             continue;
         }
-        let (resp, lock) = match serde_json::from_str::<Request>(&line) {
-            Ok(Request::Lock) => (Ok(Value::Null), true),
-            Ok(req) => (handle(&lb, req), false),
-            Err(e) => (Err(format!("bad request: {e}")), false),
+        let req = serde_json::from_str::<Request>(&line);
+        let lock = matches!(req, Ok(Request::Lock));
+        let resp = match req {
+            Ok(r) => handle(r),
+            Err(e) => Err(format!("bad request: {e}")),
         };
         if serde_json::to_writer(&mut s, &resp).is_ok() {
             let _ = s.write_all(b"\n");
