@@ -318,6 +318,9 @@ fn show(item: &ItemRecord, vault: &str) -> R<()> {
         let c = totp::current(t)?;
         row("totp", &format!("{} {}  ({}s)", &c.code[..c.code.len() / 2], &c.code[c.code.len() / 2..], c.remaining));
     }
+    if let Some(p) = &i.passkey {
+        row("passkey", &format!("{} · {}", p.user_name, p.rp_id));
+    }
     for f in &i.fields {
         row(&f.name, if f.concealed { "••••••••" } else { &f.value });
     }

@@ -47,6 +47,28 @@ pub struct Item {
     pub updated_at: u64,
     /// Older passwords, newest first. Filled in by `update_item`.
     pub password_history: Vec<PasswordChange>,
+    pub passkey: Option<Passkey>,
+}
+
+/// A WebAuthn credential (ES256). Created and used only inside lockbox; the key never reaches a web page.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Passkey {
+    pub rp_id: String,
+    /// base64url
+    pub credential_id: String,
+    /// base64url, the site's user id
+    pub user_handle: String,
+    pub user_name: String,
+    pub user_display_name: String,
+    /// P-256 private scalar, base64url
+    pub private_key: String,
+    pub created_at: u64,
+}
+
+impl std::fmt::Debug for Passkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Passkey").field("rp_id", &self.rp_id).field("user_name", &self.user_name).field("private_key", &"[redacted]").finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

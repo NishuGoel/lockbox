@@ -5,7 +5,7 @@ pub mod totp;
 pub mod vault;
 
 pub use crypto::{KdfParams, SecretKey};
-pub use vault::{Field, ImportSummary, Item, ItemRecord, Kind, Lockbox, PasswordChange, Vault, backup_file, display_host, site_matches};
+pub use vault::{Field, ImportSummary, Item, ItemRecord, Kind, Lockbox, Passkey, PasswordChange, Vault, backup_file, display_host, site_matches};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

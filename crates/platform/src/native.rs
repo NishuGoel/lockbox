@@ -105,7 +105,7 @@ fn summary(r: &ItemRecord, url: &str) -> Value {
     json!({
         "id": r.id, "title": r.item.title, "username": r.item.username,
         "host": r.item.urls.first().and_then(|u| display_host(u)),
-        "hasTotp": r.item.totp.is_some(), "hasPassword": r.item.password.is_some(),
+        "hasTotp": r.item.totp.is_some(), "hasPassword": r.item.password.is_some(), "hasPasskey": r.item.passkey.is_some(),
         "matches": for_site(r, url),
     })
 }
@@ -113,6 +113,10 @@ fn summary(r: &ItemRecord, url: &str) -> Value {
 fn find(call: Call, id: &str) -> Result<ItemRecord, String> {
     let id = Uuid::parse_str(id).map_err(|_| "bad id")?;
     items(call)?.into_iter().find(|r| r.id == id).ok_or_else(|| "item not found".into())
+}
+
+fn opt_str(v: &str) -> Option<String> {
+    (!v.trim().is_empty()).then(|| v.trim().to_string())
 }
 
 fn same_user(a: Option<&str>, b: &str) -> bool {
@@ -211,6 +215,62 @@ pub fn handle(msg: &Value, call: Call) -> Result<Value, String> {
             let length = msg.get("length").and_then(Value::as_u64).unwrap_or(20) as usize;
             generator::password(PasswordOpts { length, ..Default::default() }).map(|p| json!({ "password": p })).map_err(|e| e.to_string())
         }
+        "pk_list" => {
+            let rp = s(msg, "rpId");
+            if !crate::webauthn::rp_id_ok(rp, url) {
+                return Ok(json!({ "items": [] }));
+            }
+            let allow: Vec<&str> = msg.get("allow").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            let hits: Vec<Value> = items(call)?
+                .iter()
+                .filter_map(|r| r.item.passkey.as_ref().map(|p| (r, p)))
+                .filter(|(_, p)| p.rp_id.eq_ignore_ascii_case(rp) && (allow.is_empty() || allow.contains(&p.credential_id.as_str())))
+                .map(|(r, p)| json!({ "id": r.id, "title": r.item.title, "userName": p.user_name, "displayName": p.user_display_name }))
+                .collect();
+            Ok(json!({ "items": hits }))
+        }
+        "pk_create" => {
+            let rp = s(msg, "rpId");
+            let algs: Vec<i64> = msg.get("algs").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
+            if !algs.is_empty() && !algs.contains(&crate::webauthn::ES256) {
+                return Ok(json!({ "fallback": true }));
+            }
+            let all = items(call)?;
+            let exclude: Vec<&str> = msg.get("exclude").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            if all.iter().filter_map(|r| r.item.passkey.as_ref()).any(|p| p.rp_id.eq_ignore_ascii_case(rp) && exclude.contains(&p.credential_id.as_str())) {
+                return Err("InvalidStateError: you already have a passkey for this account in lockbox".into());
+            }
+            let req = crate::webauthn::Request { page_url: url, rp_id: rp, challenge: s(msg, "challenge") };
+            let (user, display) = (s(msg, "userName"), s(msg, "displayName"));
+            let (pk, resp) = crate::webauthn::create(&req, s(msg, "userId"), user, display)?;
+            let site_url = format!("https://{}", pk.rp_id);
+            // same account re-registering → replace its passkey; else attach to the matching login (like 1Password)
+            let same_account = |r: &&ItemRecord| r.item.passkey.as_ref().is_some_and(|p| p.rp_id == pk.rp_id && p.user_handle == pk.user_handle);
+            let existing = all.iter().find(same_account).or_else(|| all.iter().find(|r| r.item.passkey.is_none() && for_site(r, &site_url) && same_user(r.item.username.as_deref(), user)));
+            let title = match existing {
+                Some(r) => {
+                    let mut item = r.item.clone();
+                    item.passkey = Some(pk);
+                    call(Request::Update { id: r.id, item })?;
+                    r.item.title.clone()
+                }
+                None => {
+                    let vaults: Vec<Vault> = serde_json::from_value(call(Request::Vaults)?).map_err(|e| e.to_string())?;
+                    let vault = vaults.iter().find(|v| v.name.eq_ignore_ascii_case("Personal")).or(vaults.first()).ok_or("no vault")?;
+                    let title = opt_str(s(msg, "rpName")).unwrap_or_else(|| pk.rp_id.clone());
+                    let item = Item { title: title.clone(), username: opt_str(user), urls: vec![site_url], passkey: Some(pk), ..Default::default() };
+                    call(Request::Add { vault: vault.id, item })?;
+                    title
+                }
+            };
+            Ok(json!({ "response": resp, "title": title }))
+        }
+        "pk_get" => {
+            let r = find(call, s(msg, "id"))?;
+            let pk = r.item.passkey.as_ref().ok_or("no passkey on this item")?;
+            let req = crate::webauthn::Request { page_url: url, rp_id: s(msg, "rpId"), challenge: s(msg, "challenge") };
+            Ok(json!({ "response": crate::webauthn::assert(&req, pk)? }))
+        }
         "open_app" => {
             let _ = std::process::Command::new("open").args(["-b", "dev.lockbox.desktop"]).spawn();
             Ok(json!({ "ok": true }))
@@ -281,6 +341,39 @@ mod tests {
         assert_eq!((add["action"].as_str(), add["title"].as_str(), add["vault"].as_str()), (Some("added"), Some("figma.com"), Some("Personal")));
         assert_eq!(lb.search("figma").unwrap()[0].item.urls, vec!["https://figma.com"]);
         assert_eq!(ask(&lb, json!({ "cmd": "check", "url": "https://figma.com/x", "username": "me", "password": "fig" })).unwrap()["status"], "same");
+    }
+
+    #[test]
+    fn passkeys_attach_list_and_sign() {
+        let lb = vault();
+        let ch = crate::webauthn::b64(b"challenge-1");
+        let make = |user: &str, uid: &str| ask(&lb, json!({ "cmd": "pk_create", "url": "https://github.com/settings", "rpId": "github.com", "rpName": "GitHub",
+            "userId": crate::webauthn::b64(uid.as_bytes()), "userName": user, "displayName": user, "challenge": ch, "algs": [-7, -257] }));
+        let c = make("me@example.com", "u1").unwrap();
+        assert_eq!(c["title"], "GitHub", "attached to the existing GitHub login");
+        assert_eq!(lb.items(None).unwrap().len(), 2);
+        let other = make("work@example.com", "u2").unwrap();
+        assert_eq!(other["title"], "GitHub");
+        assert_eq!(lb.items(None).unwrap().len(), 3, "a second account gets its own item");
+        let c = make("me@example.com", "u1").unwrap();
+        assert_eq!(lb.items(None).unwrap().len(), 3, "re-registering the same account replaces its passkey");
+
+        let listed = ask(&lb, json!({ "cmd": "pk_list", "url": "https://github.com/login", "rpId": "github.com" })).unwrap();
+        assert_eq!(listed["items"].as_array().unwrap().len(), 2);
+        assert!(listed.to_string().find("private").is_none(), "listing never includes keys");
+        let only = ask(&lb, json!({ "cmd": "pk_list", "url": "https://github.com/login", "rpId": "github.com", "allow": [c["response"]["id"]] })).unwrap();
+        assert_eq!(only["items"].as_array().unwrap().len(), 1);
+        assert_eq!(ask(&lb, json!({ "cmd": "pk_list", "url": "https://evil.io/", "rpId": "github.com" })).unwrap()["items"].as_array().unwrap().len(), 0);
+
+        let id = only["items"][0]["id"].as_str().unwrap();
+        let got = ask(&lb, json!({ "cmd": "pk_get", "id": id, "url": "https://github.com/login", "rpId": "github.com", "challenge": ch })).unwrap();
+        assert!(got["response"]["signature"].as_str().unwrap().len() > 60);
+        assert!(ask(&lb, json!({ "cmd": "pk_get", "id": id, "url": "https://evil.io/", "rpId": "github.com", "challenge": ch })).is_err());
+
+        let dup = ask(&lb, json!({ "cmd": "pk_create", "url": "https://github.com/", "rpId": "github.com", "userId": "dTE", "userName": "x", "challenge": ch, "exclude": [c["response"]["id"]] }));
+        assert!(dup.unwrap_err().starts_with("InvalidStateError"));
+        let rsa_only = ask(&lb, json!({ "cmd": "pk_create", "url": "https://github.com/", "rpId": "github.com", "userId": "dTE", "userName": "x", "challenge": ch, "algs": [-257] })).unwrap();
+        assert_eq!(rsa_only["fallback"], true);
     }
 
     #[test]

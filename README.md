@@ -28,6 +28,7 @@ open ../../../target/release/bundle/macos/lockbox.app
 - **Saving:** log in anywhere as usual and lockbox offers **Save** / **Update password** (the old password goes to history). "Never for this site" silences a site.
 - **Filling:** **⌘⇧L** fills the login for the page you're on (on a 2FA page it fills the code), or click the icon to choose.
 - **Anti-phishing:** a login only fills on its own site or its subdomains, never on a lookalike, and never on an http downgrade.
+- **Passkeys:** when a site offers to create a passkey, lockbox asks **Save passkey in lockbox?** and keeps it in your vault (and backups). Signing in shows your accounts for that site. **Other options** hands the request to the browser (iCloud Keychain, phone, security key). Keys never reach the page; the site is taken from the browser, not the page.
 - Works while lockbox is unlocked (the app or `lockbox unlock`).
 
 ## CLI
@@ -76,4 +77,5 @@ apps/extension  Dia/Chrome extension (Manifest V3, no build step)
 - [x] **M5** Browser extension for Dia + Chrome: offers to save/update every login, fills on ⌘⇧L, 2FA codes, anti-phishing site matching, password history
 - [ ] **M6** Sync server + iPhone app with AutoFill (needs Apple Developer Program)
 - [ ] **M7** Watchtower: breached (HIBP k-anonymity), weak, reused, missing 2FA, one-click change via /.well-known/change-password
-- [ ] **M8** Passkeys (Credential Exchange), Touch ID, SSH agent, share links
+- [x] **M5.1** Passkeys in lockbox for Dia + Chrome (verified against webauthn.io)
+- [ ] **M8** Passkeys on iPhone/Safari (credential provider), Credential Exchange import/export, Touch ID, SSH agent, share links

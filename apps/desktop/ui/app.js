@@ -232,6 +232,9 @@ function detail() {
     const ring = h('div', { class: 'ring', id: 'totp-ring' }, svg, h('span', {}, ''));
     rows.push(fieldRow('one-time code', h('span', { class: 'v code', id: 'totp-code' }, '––– –––'), ring, copyBtn('Copy code', () => copyField(it.id, 'totp', 'Code copied'))));
   }
+  if (it.passkey) rows.push(fieldRow('passkey', h('span', { class: 'v' }, `${it.passkey.userName || 'account'} · ${it.passkey.rpId}`),
+    h('span', { class: 'faint' }, 'added ' + ago(it.passkey.createdAt))));
+  if (it.historyCount) rows.push(fieldRow('previous passwords', h('span', { class: 'v muted' }, `${it.historyCount} older password${it.historyCount === 1 ? '' : 's'} kept`)));
   for (const u of it.urls) rows.push(fieldRow('website', h('span', { class: 'v' }, u), copyBtn('Copy website', async () => { await invoke('copy_text', { text: u }); toast('Website copied', null); })));
   for (const [name, value] of it.fields) {
     const shown = value ?? S.revealed[name];
@@ -625,7 +628,7 @@ function sheet() {
     }
     focusAfter = 'ex-pw';
     body = [h('h2', {}, 'Export all items'),
-      h('p', { class: 'muted' }, 'The CSV holds every password in plain text. Anyone who gets the file can read them.'),
+      h('p', { class: 'muted' }, 'The CSV holds every password in plain text. Anyone who gets the file can read them. Passkeys can’t go in a CSV; your backups include them.'),
       h('div', { class: 'field' }, h('label', { for: 'ex-pw' }, 'Master password'), pw), err,
       h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), h('button', { class: 'btn primary', onClick: go }, 'Export…'))];
   } else if (K.kind === 'restore') {

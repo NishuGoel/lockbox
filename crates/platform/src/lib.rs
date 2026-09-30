@@ -2,6 +2,7 @@ pub mod agent;
 pub mod backup;
 pub mod mac;
 pub mod native;
+pub mod webauthn;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
