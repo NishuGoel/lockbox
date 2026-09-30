@@ -5,7 +5,7 @@ pub mod totp;
 pub mod vault;
 
 pub use crypto::{KdfParams, SecretKey};
-pub use vault::{Field, ImportSummary, Item, ItemRecord, Kind, Lockbox, Passkey, PasswordChange, Vault, backup_file, display_host, site_matches};
+pub use vault::{Field, ImportSummary, Item, ItemRecord, Kind, Lockbox, Passkey, PasswordChange, TRASH_DAYS, Vault, backup_file, display_host, site_matches};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -27,6 +27,8 @@ pub enum Error {
     BadGeneratorOptions(&'static str),
     #[error("{0}")]
     Import(String),
+    #[error("move or delete its items first (and a lockbox always keeps one vault)")]
+    VaultNotEmpty,
     #[error("invalid TOTP secret")]
     BadTotp,
     #[error(transparent)]

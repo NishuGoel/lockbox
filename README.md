@@ -51,6 +51,9 @@ lockbox import 1Password.1pux --from-vault Employee   # or a Chrome/Safari CSV
 lockbox backup                      # encrypted copy (the app does this daily)
 lockbox export ~/Desktop/all.csv    # plaintext, asks for your master password
 lockbox restore <file.lockbox>
+lockbox passwd                      # change master password
+lockbox trash / undelete <item>     # Recently deleted (30 days)
+lockbox mv <item> <vault>; lockbox vaults rename|rm ...
 lockbox lock
 ```
 
@@ -78,4 +81,5 @@ apps/extension  Dia/Chrome extension (Manifest V3, no build step)
 - [ ] **M6** Sync server + iPhone app with AutoFill (needs Apple Developer Program)
 - [ ] **M7** Watchtower: breached (HIBP k-anonymity), weak, reused, missing 2FA, one-click change via /.well-known/change-password
 - [x] **M5.1** Passkeys in lockbox for Dia + Chrome (verified against webauthn.io)
+- [x] **M5.2** Change master password (+ stronger key derivation), Recently deleted (30 days), password history view, vault management + moving items
 - [ ] **M8** Passkeys on iPhone/Safari (credential provider), Credential Exchange import/export, Touch ID, SSH agent, share links
