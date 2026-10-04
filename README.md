@@ -54,6 +54,8 @@ lockbox restore <file.lockbox>
 lockbox passwd                      # change master password
 lockbox trash / undelete <item>     # Recently deleted (30 days)
 lockbox mv <item> <vault>; lockbox vaults rename|rm ...
+lockbox share <item> [--views 1] [--expires 1d] [--passphrase]   # needs server/share deployed
+lockbox shares [revoke <id>]
 lockbox lock
 ```
 
@@ -66,6 +68,7 @@ crates/server   sync server (axum + SQLite, single binary)
 apps/desktop    Tauri 2 macOS app (plain HTML/CSS/JS, no bundler)
 crates/platform macOS Keychain, clipboard, agent socket, backups, browser connector
 apps/extension  Dia/Chrome extension (Manifest V3, no build step)
+server/share    share-link server (Cloudflare Worker + Durable Objects), see its README
 ```
 
 ## Roadmap
@@ -81,5 +84,6 @@ apps/extension  Dia/Chrome extension (Manifest V3, no build step)
 - [ ] **M6** Sync server + iPhone app with AutoFill (needs Apple Developer Program)
 - [ ] **M7** Watchtower: breached (HIBP k-anonymity), weak, reused, missing 2FA, one-click change via /.well-known/change-password
 - [x] **M5.1** Passkeys in lockbox for Dia + Chrome (verified against webauthn.io)
+- [x] **M5.3** Share links that really expire (N views / time limit, optional passphrase, revoke) via your own free Cloudflare Worker (`server/share`)
 - [x] **M5.2** Change master password (+ stronger key derivation), Recently deleted (30 days), password history view, vault management + moving items
 - [ ] **M8** Passkeys on iPhone/Safari (credential provider), Credential Exchange import/export, Touch ID, SSH agent, share links

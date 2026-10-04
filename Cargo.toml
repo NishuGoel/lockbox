@@ -1,3 +1,6 @@
 [workspace]
 members = ["crates/*", "apps/desktop/src-tauri"]
 resolver = "3"
+
+[profile.test]
+opt-level = 2

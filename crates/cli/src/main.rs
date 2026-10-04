@@ -7,6 +7,7 @@ use std::time::Duration;
 use lockbox_platform::agent::{self, Request};
 use lockbox_platform::backup::{self, Settings};
 use lockbox_platform::mac;
+use lockbox_platform::share::{self, Include, Server};
 use clap::{Parser, Subcommand};
 use lockbox_core::generator::{self, PasswordOpts};
 use lockbox_core::{ImportSummary, Item, ItemRecord, KdfParams, Kind, Lockbox, SecretKey, Vault, import, totp};
@@ -98,6 +99,30 @@ enum Cmd {
     Mv { query: String, vault: String },
     /// Change your master password
     Passwd,
+    /// Make a link that shares one item and stops working after N views or a time limit
+    Share {
+        query: String,
+        /// how many times the link can be opened
+        #[arg(long, default_value_t = 1)]
+        views: u32,
+        /// keep working until it expires, however often it's opened
+        #[arg(long, conflicts_with = "views")]
+        unlimited: bool,
+        /// how long the link lives: 30m, 1h, 1d, 7d (max 30d)
+        #[arg(long, default_value = "1d")]
+        expires: String,
+        /// ask the recipient for a passphrase too (send it separately)
+        #[arg(long)]
+        passphrase: bool,
+        /// include the 2FA secret (gives lasting access)
+        #[arg(long)]
+        with_totp: bool,
+    },
+    /// List links you've shared, revoke one, or set up the share server
+    Shares {
+        #[command(subcommand)]
+        cmd: Option<SharesCmd>,
+    },
     /// Move an item to Recently deleted
     Rm {
         query: String,
@@ -139,6 +164,14 @@ enum Cmd {
     Agent { minutes: u64 },
     #[command(name = "__clear-clipboard", hide = true)]
     ClearClipboard { change_count: isize },
+}
+
+#[derive(Subcommand)]
+enum SharesCmd {
+    /// make a link stop working now
+    Revoke { id: String },
+    /// connect lockbox to your share server (asks for its token)
+    Setup { url: String },
 }
 
 #[derive(Subcommand)]
@@ -490,6 +523,37 @@ fn run(cmd: Cmd) -> R<()> {
             }
             println!("\nThe export file holds your passwords in plain text. Delete it now:\n  rm {:?}", file);
         }
+        Cmd::Shares { cmd: Some(SharesCmd::Setup { url }) } => {
+            // the deploy script passes the token in the environment, so it never lands in shell history
+            let token = match std::env::var("LOCKBOX_SHARE_TOKEN") {
+                Ok(t) if !t.is_empty() => Zeroizing::new(t),
+                _ => prompt_hidden("Share server token (from the deploy script): ")?,
+            };
+            Server::setup(&lockbox_platform::data_dir()?, &url, &token)?;
+            println!("Sharing is set up with {url}.");
+        }
+        Cmd::Shares { cmd } => {
+            let dir = lockbox_platform::data_dir()?;
+            let server = Server::configured(&dir).ok_or("sharing isn't set up yet: run `lockbox shares setup <url>`")?;
+            match cmd {
+                Some(SharesCmd::Revoke { id }) => {
+                    server.revoke(&dir, &id)?;
+                    println!("Revoked. That link no longer opens.");
+                }
+                _ => {
+                    let now_ms = backup::now() * 1000;
+                    let live: Vec<_> = Settings::load(&dir).shares.into_iter().filter(|s| s.expires_at > now_ms).collect();
+                    for s in &live {
+                        let mins = (s.expires_at - now_ms) / 60_000;
+                        let views = s.views.map_or("unlimited views".to_string(), |v| format!("{v} view{}", if v == 1 { "" } else { "s" }));
+                        println!("{}  {:<28} {views}, expires in {}", s.id, s.title, if mins < 120 { format!("{mins} min") } else { format!("{} h", mins / 60) });
+                    }
+                    if live.is_empty() {
+                        println!("No active share links.");
+                    }
+                }
+            }
+        }
         Cmd::Passwd => {
             if agent::is_running(&p.sock) {
                 agent::call(&p.sock, &Request::Lock)?;
@@ -527,6 +591,26 @@ fn run(cmd: Cmd) -> R<()> {
                     let v = s.vault(Some(&name))?;
                     s.call::<()>(Request::DeleteVault { id: v.id })?;
                     println!("Deleted vault {}.", v.name);
+                }
+                Cmd::Share { query, views, unlimited, expires, passphrase, with_totp } => {
+                    let dir = lockbox_platform::data_dir()?;
+                    let server = Server::configured(&dir).ok_or("sharing isn't set up yet: run `lockbox shares setup <url>`")?;
+                    let ttl = share::parse_duration(&expires).ok_or("use a duration like 30m, 1h, 1d or 7d")?;
+                    let r = s.find(&query)?;
+                    let pp = if passphrase {
+                        let p = prompt_hidden("Passphrase for the recipient: ")?;
+                        if p.chars().count() < 6 {
+                            return Err("use at least 6 characters".into());
+                        }
+                        Some(p)
+                    } else {
+                        None
+                    };
+                    let inc = Include { totp: with_totp, ..Default::default() };
+                    let (link, _) = server.share(&dir, &r.item, &inc, (!unlimited).then_some(views), ttl, pp.as_deref().map(|p| p.as_str()))?;
+                    println!("{link}");
+                    eprintln!("Anyone with this link can open {} {} within {expires}{}.", r.item.title, if unlimited { "any number of times".into() } else { format!("{views} time{}", if views == 1 { "" } else { "s" }) },
+                        if passphrase { " (with the passphrase; send it separately)" } else { "" });
                 }
                 Cmd::Trash => {
                     let items: Vec<ItemRecord> = s.call(Request::Trash)?;

@@ -25,6 +25,10 @@ pub struct Settings {
     /// the "turn on backups?" question has been answered
     pub backup_asked: bool,
     pub last_recovery_check: u64,
+    /// share server (see server/share); its token lives in the Keychain
+    pub share_url: Option<String>,
+    /// links you've shared, for revoking (ids and titles only, never keys)
+    pub shares: Vec<crate::share::SharedLink>,
 }
 
 impl Settings {

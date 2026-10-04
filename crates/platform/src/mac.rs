@@ -9,6 +9,18 @@ mod imp {
     const SERVICE: &str = "lockbox.secret-key";
     const NOT_FOUND: i32 = -25300;
 
+    pub fn save_secret(service: &str, account: &str, v: &str) -> Result<(), String> {
+        passwords::set_generic_password(service, account, v.as_bytes()).map_err(|e| e.to_string())
+    }
+
+    pub fn load_secret(service: &str, account: &str) -> Result<Option<String>, String> {
+        match passwords::get_generic_password(service, account) {
+            Ok(b) => Ok(Some(String::from_utf8_lossy(&b).into_owned())),
+            Err(e) if e.code() == NOT_FOUND => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     // ponytail: legacy login keychain. ThisDeviceOnly/biometric ACLs need a signed app with entitlements (M3).
     pub fn save_secret_key(account: &str, sk: &str) -> Result<(), String> {
         passwords::set_generic_password(SERVICE, account, sk.as_bytes()).map_err(|e| e.to_string())
@@ -45,6 +57,8 @@ mod imp {
     const MSG: &str = "only macOS is supported for now";
     pub fn save_secret_key(_: &str, _: &str) -> Result<(), String> { Err(MSG.into()) }
     pub fn load_secret_key(_: &str) -> Result<Option<String>, String> { Err(MSG.into()) }
+    pub fn save_secret(_: &str, _: &str, _: &str) -> Result<(), String> { Err(MSG.into()) }
+    pub fn load_secret(_: &str, _: &str) -> Result<Option<String>, String> { Err(MSG.into()) }
     pub fn copy_concealed(_: &str) -> isize { panic!("{MSG}") }
     pub fn clear_if_unchanged(_: isize) {}
 }
