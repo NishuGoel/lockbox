@@ -8,6 +8,7 @@ use lockbox_core::import::{self, Parsed};
 use lockbox_core::{ImportSummary, Item, KdfParams, Kind, Lockbox, SecretKey, Vault, totp};
 use lockbox_platform::agent::{self, Request};
 use lockbox_platform::backup::{self, Settings};
+use lockbox_platform::share::{Include, Server, SharedLink};
 use lockbox_platform::{mac, native};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -664,6 +665,52 @@ async fn restore(app: AppHandle, s: S<'_>, path: String, password: String, secre
     Ok(())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareState {
+    url: Option<String>,
+    links: Vec<SharedLink>,
+}
+
+#[tauri::command]
+fn share_state(s: S) -> ShareState {
+    let now_ms = backup::now() * 1000;
+    let st = s.settings();
+    ShareState {
+        url: Server::configured(&s.dir).map(|sv| sv.url),
+        links: st.shares.into_iter().filter(|l| l.expires_at > now_ms).collect(),
+    }
+}
+
+#[tauri::command]
+async fn share_setup(s: S<'_>, url: String, token: String) -> Res<()> {
+    Server::setup(&s.dir, &url, &Zeroizing::new(token))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareLink {
+    link: String,
+    expires_at: u64,
+}
+
+#[tauri::command]
+async fn share_item(s: S<'_>, id: Uuid, include: Include, views: Option<u32>, ttl: u64, passphrase: Option<String>) -> Res<ShareLink> {
+    let server = Server::configured(&s.dir).ok_or("Sharing isn't set up yet.")?;
+    let item = s.with(|lb| lb.get_item(&id))?.item;
+    let pp = passphrase.map(Zeroizing::new);
+    if pp.as_ref().is_some_and(|p| !p.is_empty() && p.chars().count() < 6) {
+        return Err("Use at least 6 characters for the passphrase.".into());
+    }
+    let (link, rec) = server.share(&s.dir, &item, &include, views, ttl, pp.as_deref().map(|p| p.as_str()))?;
+    Ok(ShareLink { link, expires_at: rec.expires_at })
+}
+
+#[tauri::command]
+async fn share_revoke(s: S<'_>, id: String) -> Res<()> {
+    Server::configured(&s.dir).ok_or("Sharing isn't set up yet.")?.revoke(&s.dir, &id)
+}
+
 #[tauri::command]
 fn hide_quick(app: AppHandle) {
     if let Some(w) = app.get_webview_window("quick") {
@@ -770,6 +817,7 @@ fn main() {
             save_item, delete_item, import_pick, import_run, delete_import_file, settings_get, backup_set, backup_choose_dir, backup_run,
             trash_list, restore_item, purge_item, empty_trash, vault_create, vault_rename, vault_delete,
             history_list, history_reveal, history_copy, history_restore, change_password,
+            share_state, share_setup, share_item, share_revoke,
             recovery_verify, recovery_snooze, reveal_secret_key, export_csv, restore_pick, restore, hide_quick, open_main
         ])
         .build(tauri::generate_context!())

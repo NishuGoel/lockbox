@@ -162,7 +162,7 @@ function side() {
     h('button', { class: 'nav' + (S.view === 'trash' ? ' on' : ''), onClick: async () => { S.view = 'trash'; await load(); render(); } },
       icon('trash', 17), 'Recently deleted', S.trash.length > 0 && h('span', { class: 'count' }, S.trash.length)),
     h('button', { class: 'nav', onClick: openImporter }, icon('download', 17), 'Import'),
-    h('button', { class: 'nav' + (S.view === 'settings' ? ' on' : ''), onClick: async () => { S.view = 'settings'; S.settings = await invoke('settings_get'); render(); } }, icon('gear', 17), 'Settings'),
+    h('button', { class: 'nav' + (S.view === 'settings' ? ' on' : ''), onClick: async () => { S.view = 'settings'; S.share = null; S.settings = await invoke('settings_get'); render(); } }, icon('gear', 17), 'Settings'),
     h('div', { class: 'section-row' }, h('div', { class: 'section' }, 'Vaults'),
       h('button', { class: 'add', 'aria-label': 'New vault', title: 'New vault', onClick: () => { S.sheet = { kind: 'vault-new' }; render(); } }, icon('plus', 14))),
     S.vaults.map((v) => h('div', { class: 'vrow' },
@@ -261,6 +261,7 @@ function detail() {
         h('span', { class: 'chip' }, h('span', { class: 'dot', hue: hue(vaultName(it.vaultId)) }), vaultName(it.vaultId)),
         it.tags.map((t) => h('span', { class: 'chip' }, '#' + t)))),
       h('button', { class: 'icon-btn' + (it.favorite ? ' star' : ''), 'aria-label': it.favorite ? 'Remove from favorites' : 'Add to favorites', 'aria-pressed': String(it.favorite), onClick: () => toggleFav(it.id) }, icon('star', 18, it.favorite)),
+      h('button', { class: 'btn sm', onClick: () => openShare(it.id) }, icon('share'), 'Share…'),
       h('button', { class: 'btn sm', onClick: () => openEditor(it.id) }, icon('edit'), 'Edit')),
     rows.length ? h('div', { class: 'fields' }, rows) : h('p', { class: 'muted' }, 'This item has no fields yet.'),
     h('div', { class: 'foot' }, h('span', { class: 'faint' }, 'Edited ' + ago(it.updatedAt) + ' · end-to-end encrypted'), del)));
@@ -565,6 +566,8 @@ function settingsView() {
         h('span', { class: 'grow muted' }, 'Change it any time. Your Secret Key stays the same, and lockbox uses today’s recommended encryption strength for the new one.'),
         h('button', { class: 'btn sm', onClick: () => { S.sheet = { kind: 'passwd' }; render(); } }, icon('key'), 'Change…'))),
 
+    h('div', { class: 'sec' }, h('h2', {}, 'Sharing'), ...shareSettings()),
+
     h('div', { class: 'sec' }, h('h2', {}, 'Export & restore'),
       h('div', { class: 'sec-row' },
         h('span', { class: 'grow muted' }, 'A CSV that Apple Passwords, Chrome, Bitwarden, 1Password or lockbox can import. It’s plain text: delete it once you’re done.'),
@@ -606,9 +609,52 @@ function trashView() {
       : h('div', { class: 'empty' }, h('p', {}, 'Nothing here. Deleted items show up here for 30 days.'))));
 }
 
+async function openShare(id) {
+  S.sheet = { kind: 'share', id, state: await invoke('share_state'), step: 'form', views: 1, ttl: 86400,
+    include: { username: true, password: true, urls: true, notes: true, fields: true, totp: false } };
+  render();
+}
+
+// shared by the Share sheet and Settings: connect lockbox to the share server
+function shareSetup(K, onDone) {
+  const url = h('input', { class: 'input mono', id: 'sh-url', placeholder: 'https://lockbox-share.you.workers.dev', spellcheck: 'false' });
+  const token = h('input', { class: 'input mono', id: 'sh-token', type: 'password', placeholder: 'Token from the deploy script', onKeydown: (e) => e.key === 'Enter' && go() });
+  const err = h('p', { class: 'error', role: 'alert' });
+  const btn = h('button', { class: 'btn primary', onClick: () => go() }, 'Connect');
+  async function go() {
+    btn.disabled = true; btn.textContent = 'Checking…'; err.textContent = '';
+    try { await invoke('share_setup', { url: url.value, token: token.value }); K.state = await invoke('share_state'); onDone(); }
+    catch (e) { err.textContent = String(e); btn.disabled = false; btn.textContent = 'Connect'; }
+  }
+  focusAfter = 'sh-url';
+  return [h('h2', {}, 'Set up share links'),
+    h('p', { class: 'muted' }, 'Share links need your own small server (free on Cloudflare). It only ever stores scrambled data and deletes it when the link expires or is opened.'),
+    h('p', { class: 'faint' }, 'Run server/share/deploy.sh once from the lockbox repo. It connects lockbox automatically, or paste the address and token it prints here.'),
+    h('div', { class: 'field' }, h('label', { for: 'sh-url' }, 'Server address'), url),
+    h('div', { class: 'field' }, h('label', { for: 'sh-token' }, 'Token'), token),
+    err, h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), btn)];
+}
+
 async function openHistory(id) {
   S.sheet = { kind: 'history', id, dates: await invoke('history_list', { id }), shown: {} };
   render();
+}
+
+function shareSettings() {
+  const sh = S.share;
+  if (!sh) { invoke('share_state').then((r) => { S.share = r; render(); }); return [h('p', { class: 'faint' }, 'Loading…')]; }
+  if (!sh.url) return [h('div', { class: 'sec-row' }, h('span', { class: 'grow muted' }, 'Share links aren’t set up yet. They need your own small server (free on Cloudflare).'),
+    h('button', { class: 'btn sm', onClick: () => { S.sheet = { kind: 'share-setup', state: sh }; render(); } }, 'Set up…'))];
+  return [h('p', { class: 'faint' }, 'Server: ' + sh.url),
+    sh.links.length
+      ? h('div', { class: 'trows' }, sh.links.map((l) => h('div', { class: 'trow' },
+          h('div', { class: 'grow' }, h('span', {}, l.title), h('span', { class: 'faint' }, `${l.views == null ? 'until it expires' : l.views === 1 ? 'opens once' : `opens ${l.views} times`} · expires in ${fromNow(l.expiresAt)}`)),
+          h('button', { class: 'btn sm', onClick: async () => {
+            let msg = ['Link revoked', 'it no longer opens'];
+            try { await invoke('share_revoke', { id: l.id }); } catch (e) { msg = [String(e), null]; }
+            S.share = await invoke('share_state'); render(); toast(...msg);
+          } }, 'Revoke'))))
+      : h('p', { class: 'muted' }, 'No active links. Use Share… on any item.')];
 }
 
 function closeSheet() { S.sheet = null; render(); }
@@ -707,6 +753,43 @@ function sheet() {
         } }, 'Use this')))),
       err,
       h('div', { class: 'actions' }, h('button', { class: 'btn primary', onClick: closeSheet }, 'Done'))];
+  } else if (K.kind === 'share-setup') {
+    body = shareSetup(K, async () => { S.sheet = null; await refreshSettings(); toast('Share links are set up', null); });
+  } else if (K.kind === 'share') {
+    const it = S.items.find((i) => i.id === K.id);
+    if (!K.state.url) body = shareSetup(K, () => render());
+    else if (K.step === 'done') {
+      body = [h('h2', {}, 'Link ready'),
+        h('div', { class: 'link-box' }, K.link),
+        h('p', { class: 'muted' }, `${K.views === null ? 'Opens any number of times' : K.views === 1 ? 'Opens once' : `Opens ${K.views} times`} · expires in ${fromNow(K.expiresAt)}. Anyone with the link can open it, so send it privately.`),
+        K.usedPassphrase && h('p', { class: 'warn-text' }, 'Send the passphrase separately (for example by text), never in the same message as the link.'),
+        h('div', { class: 'actions' },
+          h('button', { class: 'btn', onClick: async () => { await invoke('copy_text', { text: K.link }); toast('Link copied'); } }, icon('copy'), 'Copy link'),
+          h('button', { class: 'btn primary', onClick: closeSheet }, 'Done'))];
+    } else {
+      const say = (m) => { err.textContent = String(m); };
+      const box = (key, label, show = true) => show && h('label', {}, h('input', { type: 'checkbox', checked: K.include[key], onChange: (e) => { K.include[key] = e.target.checked; } }), label);
+      const opens = h('select', { class: 'input', id: 'sh-views', onChange: (e) => { K.views = e.target.value === 'any' ? null : Number(e.target.value); } },
+        [['1', 'Once'], ['2', '2 times'], ['5', '5 times'], ['any', 'Until it expires']].map(([v, l]) => { const o = h('option', { value: v }, l); o.selected = String(K.views ?? 'any') === v; return o; }));
+      const life = h('select', { class: 'input', id: 'sh-ttl', onChange: (e) => { K.ttl = Number(e.target.value); } },
+        [[3600, '1 hour'], [86400, '1 day'], [604800, '7 days'], [2592000, '30 days']].map(([v, l]) => { const o = h('option', { value: v }, l); o.selected = K.ttl === v; return o; }));
+      const pp = h('input', { class: 'input mono', type: 'password', id: 'sh-pp', placeholder: 'Optional', autocomplete: 'off' });
+      const btn = h('button', { class: 'btn primary', onClick: async () => {
+        btn.disabled = true; btn.textContent = 'Creating…'; say('');
+        try {
+          const r = await invoke('share_item', { id: K.id, include: K.include, views: K.views, ttl: K.ttl, passphrase: pp.value || null });
+          Object.assign(K, { step: 'done', link: r.link, expiresAt: r.expiresAt, usedPassphrase: !!pp.value }); render();
+        } catch (e) { say(e); btn.disabled = false; btn.textContent = 'Create link'; }
+      } }, icon('share'), 'Create link');
+      body = [h('h2', {}, 'Share ' + (it?.title ?? 'item')),
+        h('p', { class: 'muted' }, 'Makes a private link. The item is encrypted here; the key is only in the link, never on the server.'),
+        h('div', { class: 'field' }, h('span', { class: 'label' }, 'Include'), h('div', { class: 'inc' },
+          box('username', 'Username', !!it?.username), box('password', 'Password', !!it?.hasPassword), box('urls', 'Website', !!it?.urls.length),
+          box('notes', 'Notes', !!it?.notes), box('fields', 'Other fields', !!it?.fields.length), box('totp', '2FA secret (lasting access)', !!it?.hasTotp))),
+        h('div', { class: 'pair' }, h('div', { class: 'field' }, h('label', { for: 'sh-views' }, 'Link opens'), opens), h('div', { class: 'field' }, h('label', { for: 'sh-ttl' }, 'Expires after'), life)),
+        h('div', { class: 'field' }, h('label', { for: 'sh-pp' }, 'Passphrase'), pp),
+        err, h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), btn)];
+    }
   } else if (K.kind === 'passwd') {
     const say = (m) => { err.textContent = String(m); };
     const cur = pwField('pw-cur', () => nw.focus());
