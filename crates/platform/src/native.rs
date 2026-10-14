@@ -172,8 +172,14 @@ pub fn handle(msg: &Value, call: Call) -> Result<Value, String> {
                 Err(e) => return Ok(json!({ "status": e, "host": display_host(url) })),
             };
             let site: Vec<&ItemRecord> = all.iter().filter(|r| for_site(r, url)).collect();
-            if site.iter().any(|r| r.item.password.as_deref() == Some(pw) && (user.is_empty() || same_user(r.item.username.as_deref(), user))) {
+            let known = |r: &&ItemRecord| r.item.password.as_deref() == Some(pw) && (user.is_empty() || same_user(r.item.username.as_deref(), user));
+            if site.iter().any(known) {
                 return Ok(json!({ "status": "same" }));
+            }
+            // saved under another domain (login.microsoftonline.com vs outlook.office.com, accounts.google.com vs
+            // mail.google.com, company SSO): offer to add this site instead of a duplicate
+            if let Some(r) = all.iter().find(known) {
+                return Ok(json!({ "status": "add_site", "id": r.id, "title": r.item.title, "host": display_host(url) }));
             }
             Ok(match site.iter().find(|r| same_user(r.item.username.as_deref(), user)) {
                 Some(r) => json!({ "status": "changed", "id": r.id, "title": r.item.title, "host": display_host(url) }),
@@ -186,7 +192,22 @@ pub fn handle(msg: &Value, call: Call) -> Result<Value, String> {
                 return Err("nothing to save".into());
             }
             let host = display_host(url).ok_or("this page has no website address")?;
-            if let Some(id) = msg.get("id").and_then(Value::as_str).filter(|i| !i.is_empty()) {
+            let id = msg.get("id").and_then(Value::as_str).filter(|i| !i.is_empty());
+            if let (Some(id), true) = (id, msg.get("addSite").and_then(Value::as_bool).unwrap_or(false)) {
+                let mut r = find(call, id)?;
+                // only the item whose password was just typed here can gain this site
+                if r.item.password.as_deref() != Some(pw) {
+                    return Err("That password doesn't match this item.".into());
+                }
+                let scheme = url.split_once("://").map_or("https", |(sch, _)| sch);
+                let origin = format!("{scheme}://{host}");
+                if !for_site(&r, url) {
+                    r.item.urls.push(origin);
+                    call(Request::Update { id: r.id, item: r.item.clone() })?;
+                }
+                return Ok(json!({ "action": "site_added", "id": r.id, "title": r.item.title }));
+            }
+            if let Some(id) = id {
                 let mut r = find(call, id)?;
                 if !for_site(&r, url) {
                     return Err(format!("{} isn't saved for this site", r.item.title));
@@ -333,6 +354,16 @@ mod tests {
         let rec = lb.search("github").unwrap().remove(0);
         assert_eq!(rec.item.password.as_deref(), Some("new-pw"));
         assert_eq!(rec.item.password_history[0].password, "old-pw");
+
+        // same login typed on another domain of the same service → offer to add the site, not a duplicate
+        let sso = ask(&lb, json!({ "cmd": "check", "url": "https://login.github-sso.com/x", "username": "me@example.com", "password": "new-pw" })).unwrap();
+        assert_eq!((sso["status"].as_str(), sso["title"].as_str()), (Some("add_site"), Some("GitHub")));
+        let wrong = ask(&lb, json!({ "cmd": "save", "url": "https://login.github-sso.com/x", "password": "guess", "id": sso["id"], "addSite": true }));
+        assert!(wrong.is_err(), "a page can't attach itself to an item without its password");
+        let added = ask(&lb, json!({ "cmd": "save", "url": "https://login.github-sso.com/x", "username": "me@example.com", "password": "new-pw", "id": sso["id"], "addSite": true })).unwrap();
+        assert_eq!(added["action"], "site_added");
+        assert_eq!(ask(&lb, json!({ "cmd": "check", "url": "https://login.github-sso.com/y", "username": "me@example.com", "password": "new-pw" })).unwrap()["status"], "same");
+        assert_eq!(lb.search("github").unwrap()[0].item.urls.len(), 2);
 
         let bad = ask(&lb, json!({ "cmd": "save", "url": "https://evil.io", "password": "p", "id": changed["id"] }));
         assert!(bad.is_err(), "can't overwrite an item from a different site");

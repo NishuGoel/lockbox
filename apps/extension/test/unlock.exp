@@ -1,0 +1,5 @@
+# used by e2e.js: unlock the test vault (/tmp/lbx) from a script
+set timeout 20
+spawn $env(LB_BIN) unlock --minutes 30
+expect "Master password: "; sleep 0.3; send "correct horse battery\r"
+expect "Unlocked."; expect eof
