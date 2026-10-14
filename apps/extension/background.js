@@ -60,6 +60,39 @@ async function setOffer(tabId, offer) {
 }
 async function neverHosts() { return (await chrome.storage.local.get('never')).never || []; }
 
+// "Not now" is remembered per site + account for 30 days (no passwords stored, just host and username)
+const SNOOZE_MS = 30 * 86400 * 1000;
+const snoozeKey = (host, user) => host + '\n' + (user || '').toLowerCase();
+async function snoozed(host, user) {
+  const all = (await chrome.storage.local.get('snooze')).snooze || {};
+  return (all[snoozeKey(host, user)] || 0) > Date.now();
+}
+async function snooze(host, user) {
+  const all = (await chrome.storage.local.get('snooze')).snooze || {};
+  for (const [k, until] of Object.entries(all)) if (until < Date.now()) delete all[k];
+  all[snoozeKey(host, user)] = Date.now() + SNOOZE_MS;
+  await chrome.storage.local.set({ snooze: all });
+}
+
+// Decide whether a captured login deserves a prompt. Returns the offer to show, or null.
+async function evaluate(o) {
+  const check = await native({ cmd: 'check', url: o.url, username: o.username, password: o.password });
+  const status = check.status || (check.error === 'no_connector' ? 'no_connector' : null);
+  if (status === 'locked') return { ...o, status: 'locked' }; // hold quietly; re-checked after unlock
+  if (!['new', 'changed', 'add_site'].includes(status)) return null;
+  if (status !== 'changed' && (await snoozed(o.host, o.username))) return null;
+  return { ...o, status, id: check.id || null, title: check.title || o.host };
+}
+
+// a held (locked-time) offer gets re-checked once lockbox may be unlocked
+async function recheck(tabId) {
+  const o = (await offers())[tabId];
+  if (!o || o.status !== 'locked') return o || null;
+  const next = await evaluate(o);
+  await setOffer(tabId, next);
+  return next && next.status !== 'locked' ? next : null;
+}
+
 chrome.tabs.onRemoved.addListener((tabId) => setOffer(tabId, null));
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
@@ -81,18 +114,16 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
           const u = ((await chrome.storage.session.get('users')).users || {})[tabId];
           if (u && u.host === host && Date.now() - u.at < 10 * 60 * 1000) username = u.username;
         }
-        const check = await native({ cmd: 'check', url: msg.url, username, password: msg.password });
-        const status = check.status || (check.error === 'no_connector' ? 'no_connector' : null);
-        if (!['new', 'changed', 'locked'].includes(status)) return reply({});
-        const offer = { url: msg.url, host, username, password: msg.password, status, id: check.id || null, title: check.title || host, at: Date.now() };
+        const offer = await evaluate({ url: msg.url, host, username, password: msg.password, at: Date.now() });
         await setOffer(tabId, offer);
-        chrome.tabs.sendMessage(tabId, { type: 'offer', offer: publicOffer(offer) }, { frameId: 0 }).catch(() => {});
+        if (offer && offer.status !== 'locked') chrome.tabs.sendMessage(tabId, { type: 'offer', offer: publicOffer(offer) }, { frameId: 0 }).catch(() => {});
         return reply({});
       }
       case 'offer?': { // a freshly loaded page (after the login navigated) asks for a pending offer
-        const o = (await offers())[tabId];
-        if (o && Date.now() - o.at < OFFER_TTL && hostOf(sender.url) === o.host) return reply({ offer: publicOffer(o) });
-        if (o && Date.now() - o.at >= OFFER_TTL) await setOffer(tabId, null);
+        const held = (await offers())[tabId];
+        if (held && Date.now() - held.at >= OFFER_TTL) { await setOffer(tabId, null); return reply({}); }
+        const o = await recheck(tabId);
+        if (o && hostOf(sender.url) === o.host) return reply({ offer: publicOffer(o) });
         return reply({});
       }
       case 'decide': {
@@ -103,8 +134,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
           await setOffer(tabId, null);
           return reply({ done: true });
         }
-        if (msg.action !== 'save') { await setOffer(tabId, null); return reply({ done: true }); }
-        const r = await native({ cmd: 'save', url: o.url, username: o.username, password: o.password, id: o.status === 'changed' ? o.id : null });
+        if (msg.action === 'dismiss') { await snooze(o.host, o.username); await setOffer(tabId, null); return reply({ done: true }); }
+        if (msg.action !== 'save' && msg.action !== 'save_new') { await setOffer(tabId, null); return reply({ done: true }); }
+        const asNew = msg.action === 'save_new';
+        const r = await native({ cmd: 'save', url: o.url, username: o.username, password: o.password,
+          id: asNew ? null : o.status === 'changed' || o.status === 'add_site' ? o.id : null, addSite: !asNew && o.status === 'add_site' });
         if (r.error === 'locked') { native({ cmd: 'open_app' }); return reply({ error: 'locked' }); }
         if (r.error) return reply({ error: r.error === 'no_connector' ? 'Open the lockbox app once to connect this browser.' : r.error });
         await setOffer(tabId, null);
@@ -141,6 +175,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         const status = await native({ cmd: 'status' });
         const state = status.state || status.error;
         const res = { state, url: tab?.url || '', host: hostOf(tab?.url || '') };
+        // just unlocked? surface a login that was captured while lockbox was locked
+        if (state === 'unlocked' && tab?.id != null) {
+          const o = await recheck(tab.id);
+          if (o) chrome.tabs.sendMessage(tab.id, { type: 'offer', offer: publicOffer(o) }, { frameId: 0 }).catch(() => {});
+        }
         if (state === 'unlocked' && tab?.url) res.items = (await native({ cmd: 'match', url: tab.url })).items || [];
         return reply(res);
       }
