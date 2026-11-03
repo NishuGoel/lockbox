@@ -1,6 +1,7 @@
-// lockbox content script. Two jobs, both quiet until you act:
+// lockbox content script. Quiet until you act:
 //  1. when you submit a login form, send what you typed to lockbox so it can offer to save it
 //  2. when you ask (⌘⇧L or the popup), fill the fields lockbox sends
+//  3. when you focus a login field, suggest this site's logins right there
 // It never reads fields before you submit, and runs in an isolated world the page can't see.
 (() => {
   if (window.__lockbox) return;
@@ -224,6 +225,169 @@
     pending.set(id, null);
     passkey(id, e.data.kind, data);
   });
+
+  // ---------- inline suggestions in login fields ----------
+  // Appears only when you focus a login / 2FA / sign-up field and lockbox has something for this
+  // frame's own site. Hardened against DOM clickjacking: trusted clicks only, ignored for the first
+  // 300 ms, refused if the page made our UI (or the page itself) transparent, clipped, filtered or covered.
+  const SEARCHY = /search|query|^q$/i;
+  function fieldKind(el) {
+    if (!(el instanceof HTMLInputElement) || !visible(el) || SEARCHY.test(attrs(el)) || el.type === 'search') return null;
+    const scope = el.form || document;
+    if (el.type === 'password') return el.autocomplete === 'new-password' || passwords(scope).length >= 2 ? 'new-password' : 'password';
+    if (isOtp(el)) return 'otp';
+    if (textLike(el) && (/username|email/.test(el.autocomplete) || USER_RE.test(attrs(el))) && (passwords(scope).length || /username|email|webauthn/.test(el.autocomplete))) return 'username';
+    return null;
+  }
+
+  const MENU_CSS = `
+    :host{all:initial;position:fixed;z-index:2147483647}
+    .icon{width:22px;height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;background:rgba(18,21,28,.92);color:#5EEAD4;cursor:pointer;border:1px solid rgba(255,255,255,.14)}
+    .icon.locked{color:#9BA3B4}
+    .menu{box-sizing:border-box;min-width:280px;max-width:420px;padding:6px;border-radius:14px;background:rgba(18,21,28,.97);border:1px solid rgba(255,255,255,.12);
+          box-shadow:0 18px 48px rgba(0,0,0,.45);color:#ECEEF3;font:14px/1.4 -apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+    .row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;cursor:pointer}
+    .row.on,.row:hover{background:rgba(255,255,255,.08)}
+    .tile{width:28px;height:28px;flex:none;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:700;background:rgba(94,234,212,.14);color:#5EEAD4}
+    .t{font-weight:600}.s{color:#9BA3B4;font-size:12px}
+    .txt{display:flex;flex-direction:column;min-width:0}.txt span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .foot{display:flex;justify-content:space-between;padding:6px 10px 2px;color:#7C8497;font-size:11px}`;
+  const LOCK_SVG = 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3';
+  let inline = null;
+
+  function makeHost(tag) {
+    const host = document.createElement(tag);
+    const root = host.attachShadow({ mode: 'closed' });
+    const css = new CSSStyleSheet(); css.replaceSync(MENU_CSS); root.adoptedStyleSheets = [css];
+    document.documentElement.append(host);
+    return { host, root };
+  }
+
+  // the page must not be able to hide, fade, clip or cover our UI and trick you into clicking it
+  function untampered(host, e) {
+    if (!host.isConnected || host.parentElement !== document.documentElement) return false;
+    for (const el of [host, document.documentElement, document.body].filter(Boolean)) {
+      const cs = getComputedStyle(el);
+      if (cs.opacity !== '1' || cs.visibility !== 'visible' || cs.display === 'none' || cs.filter !== 'none' || cs.clipPath !== 'none' || (cs.mask && cs.mask !== 'none' && cs.maskImage !== 'none') || cs.mixBlendMode !== 'normal') return false;
+    }
+    return !e || document.elementFromPoint(e.clientX, e.clientY) === host;
+  }
+
+  function closeInline() {
+    if (!inline) return;
+    inline.icon.host.remove(); inline.menu?.host.remove();
+    removeEventListener('scroll', inline.place, true); removeEventListener('resize', inline.place);
+    inline.field.removeEventListener('keydown', inline.keys, true);
+    inline.field.removeEventListener('input', inline.typing);
+    inline = null;
+  }
+
+  function place() {
+    if (!inline) return;
+    const r = inline.field.getBoundingClientRect();
+    if (!r.width || r.bottom < 0 || r.top > innerHeight) return closeInline();
+    Object.assign(inline.icon.host.style, { left: `${r.right - 28}px`, top: `${r.top + (r.height - 22) / 2}px` });
+    if (inline.menu) Object.assign(inline.menu.host.style, { left: `${r.left}px`, top: `${r.bottom + 4}px`, minWidth: `${Math.max(r.width, 280)}px` });
+  }
+
+  async function choose(opt) {
+    if (opt.action === 'open') { chrome.runtime.sendMessage({ type: 'open_app' }); return closeInline(); }
+    if (opt.action === 'generate') {
+      const g = await chrome.runtime.sendMessage({ type: 'suggest-generate' });
+      if (g?.password) fillNewPassword(g.password);
+      return closeInline();
+    }
+    const creds = await chrome.runtime.sendMessage({ type: 'suggest-fill', id: opt.item.id });
+    if (creds && !creds.error) {
+      if (inline?.kind === 'otp') { if (creds.totp) fillOtp(creds.totp); } else fill(creds);
+    }
+    closeInline();
+  }
+
+  function openMenu(options) {
+    if (!inline || inline.menu) return;
+    const { host, root } = makeHost('lockbox-menu');
+    const shownAt = performance.now();
+    const box = document.createElement('div'); box.className = 'menu'; box.setAttribute('role', 'listbox');
+    const rows = options.map((o, i) => {
+      const row = document.createElement('div'); row.className = 'row'; row.setAttribute('role', 'option');
+      const tile = document.createElement('span'); tile.className = 'tile'; tile.textContent = o.letter;
+      const txt = document.createElement('span'); txt.className = 'txt';
+      const t = document.createElement('span'); t.className = 't'; t.textContent = o.title;
+      const s2 = document.createElement('span'); s2.className = 's'; s2.textContent = o.sub || '';
+      txt.append(t, s2); row.append(tile, txt);
+      row.addEventListener('mousedown', (e) => e.preventDefault()); // keep focus in the field
+      row.addEventListener('click', (e) => {
+        if (!e.isTrusted || performance.now() - shownAt < 300 || !untampered(host, e)) return;
+        choose(o);
+      });
+      row.addEventListener('mouseenter', () => select(i));
+      box.append(row);
+      return row;
+    });
+    const foot = document.createElement('div'); foot.className = 'foot';
+    const a = document.createElement('span'); a.textContent = 'lockbox'; const b = document.createElement('span'); b.textContent = '↓ ↵ to fill · esc';
+    foot.append(a, b); box.append(foot);
+    root.append(box);
+    inline.menu = { host, rows, options, sel: -1, shownAt };
+    const select = (i) => { inline.menu.sel = i; rows.forEach((r, n) => r.classList.toggle('on', n === i)); };
+    inline.select = select;
+    place();
+  }
+
+  async function onFocus(e) {
+    const field = e.target;
+    const kind = fieldKind(field);
+    if (inline && inline.field === field) return;
+    closeInline();
+    if (!kind) return;
+    const res = await chrome.runtime.sendMessage({ type: 'suggest' }).catch(() => null);
+    if (!res || document.activeElement !== field || res.state === 'unavailable' || res.state === 'no_vault') return;
+    const items = res.items || [];
+    let options = [];
+    if (res.state === 'locked') options = [{ action: 'open', letter: 'L', title: 'lockbox is locked', sub: 'Open lockbox to unlock, then click here again' }];
+    else if (kind === 'new-password') options = [{ action: 'generate', letter: '*', title: 'Use a strong password', sub: 'Fills both password fields; saved when you submit' }];
+    else if (kind === 'otp') options = items.filter((i) => i.hasTotp).map((i) => ({ item: i, letter: (i.title[0] || '?').toUpperCase(), title: `2FA code · ${i.title}`, sub: i.username || i.host }));
+    else options = items.filter((i) => i.hasPassword || kind === 'username').map((i) => ({ item: i, letter: (i.title[0] || '?').toUpperCase(), title: i.title, sub: i.username || i.host }));
+    if (!options.length) return; // nothing useful: stay quiet
+
+    const icon = makeHost('lockbox-icon');
+    const btn = document.createElement('div'); btn.className = 'icon' + (res.state === 'locked' ? ' locked' : ''); btn.setAttribute('role', 'button'); btn.setAttribute('aria-label', 'lockbox');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    for (const [k, v] of Object.entries({ width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2.2, 'stroke-linecap': 'round' })) svg.setAttribute(k, v);
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', LOCK_SVG); svg.append(path); btn.append(svg);
+    btn.addEventListener('mousedown', (ev) => ev.preventDefault());
+    btn.addEventListener('click', (ev) => { if (ev.isTrusted && untampered(icon.host, ev)) inline?.menu ? (inline.menu.host.remove(), (inline.menu = null)) : openMenu(options); });
+    icon.root.append(btn);
+
+    const keys = (ev) => {
+      const m = inline?.menu;
+      if (ev.key === 'Escape') { if (m) { m.host.remove(); inline.menu = null; ev.preventDefault(); } return; }
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+        if (!m) { openMenu(options); }
+        const mm = inline.menu; const n = mm.rows.length;
+        inline.select(ev.key === 'ArrowDown' ? (mm.sel + 1) % n : (mm.sel - 1 + n) % n);
+        ev.preventDefault(); ev.stopPropagation();
+        return;
+      }
+      // Enter only fills once you've picked a row with the arrows, and only if our UI is intact
+      if (ev.key === 'Enter' && m && m.sel >= 0 && ev.isTrusted && untampered(m.host)) { ev.preventDefault(); ev.stopPropagation(); choose(m.options[m.sel]); }
+    };
+    inline = { field, kind, icon, menu: null, place, keys };
+    const typing = () => { if (inline?.menu) { inline.menu.host.remove(); inline.menu = null; } }; // you're typing it yourself: get out of the way
+    inline.typing = typing;
+    field.addEventListener('keydown', keys, true);
+    field.addEventListener('input', typing);
+    addEventListener('scroll', place, true); addEventListener('resize', place);
+    place();
+    // open right away on an empty field when there's exactly what you'd expect (saved logins / 2FA / sign-up)
+    if (res.state === 'unlocked' && !field.value) openMenu(options);
+  }
+
+  document.addEventListener('focusin', (e) => { onFocus(e).catch(() => {}); }, true);
+  document.addEventListener('focusout', (e) => {
+    if (inline && e.target === inline.field) setTimeout(() => { if (inline && document.activeElement !== inline.field) closeInline(); }, 150);
+  }, true);
 
   chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     if (msg.type === 'fill') reply({ filled: fill(msg.creds) });
