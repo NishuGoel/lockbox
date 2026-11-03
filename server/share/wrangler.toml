@@ -1,0 +1,21 @@
+name = "lockbox-share"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+# viewer page, script, styles and fonts; the Worker decides what to serve
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+html_handling = "none"
+
+[[durable_objects.bindings]]
+name = "SHARES"
+class_name = "Share"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Share"]
+
+[vars]
+MIN_TTL_SECONDS = "60"

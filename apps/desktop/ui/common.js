@@ -23,6 +23,7 @@ const ICONS = {
   cloud: 'M17.5 19H7a5 5 0 1 1 .9-9.9A6 6 0 0 1 19.5 12 3.5 3.5 0 0 1 17.5 19z',
   more: 'M5 12h.01M12 12h.01M19 12h.01',
   undo: 'M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11',
+  share: 'M4 12v7h16v-7M12 3v12M7 8l5-5 5 5',
   key: 'M14 10a4 4 0 1 0-3.5 4L9 16H7v2H5v2H3v-3l6.5-6.5A4 4 0 0 0 14 10zM15.5 8.5v.01',
 };
 
@@ -69,6 +70,13 @@ function ago(secs) {
   const units = [[31536000, 'year'], [2592000, 'month'], [86400, 'day'], [3600, 'hour'], [60, 'minute']];
   for (const [n, u] of units) if (d >= n) { const k = Math.floor(d / n); return `${k} ${u}${k > 1 ? 's' : ''} ago`; }
   return 'just now';
+}
+
+function fromNow(ms) {
+  const s = Math.max(0, Math.round((ms - Date.now()) / 1000));
+  if (s < 3600) return `${Math.max(1, Math.round(s / 60))} min`;
+  if (s < 86400) return `${Math.round(s / 3600)} h`;
+  return `${Math.round(s / 86400)} days`;
 }
 
 function host(url) {
