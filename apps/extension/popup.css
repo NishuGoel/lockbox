@@ -33,3 +33,4 @@ footer{display:flex;align-items:center;gap:8px;padding:10px 16px 14px;border-top
 .state code{font-size:12px;color:var(--text-2)}
 .toast{padding:10px 16px;color:var(--accent);font-size:13px}
 .btn{white-space:nowrap;flex:none}
+.version{padding:0 16px 10px;margin:0}

@@ -15,7 +15,7 @@ async function boot() {
 }
 
 async function load() {
-  [S.items, S.vaults, S.settings, S.trash] = await Promise.all([invoke('items'), invoke('vaults'), invoke('settings_get'), invoke('trash_list')]);
+  [S.items, S.vaults, S.settings, S.trash, S.version] = await Promise.all([invoke('items'), invoke('vaults'), invoke('settings_get'), invoke('trash_list'), invoke('version_info')]);
   if (!S.nudged) {
     // one gentle prompt per unlock: backups first, then the monthly Emergency Kit check
     S.nudged = true;
@@ -162,7 +162,8 @@ function side() {
     h('button', { class: 'nav' + (S.view === 'trash' ? ' on' : ''), onClick: async () => { S.view = 'trash'; await load(); render(); } },
       icon('trash', 17), 'Recently deleted', S.trash.length > 0 && h('span', { class: 'count' }, S.trash.length)),
     h('button', { class: 'nav', onClick: openImporter }, icon('download', 17), 'Import'),
-    h('button', { class: 'nav' + (S.view === 'settings' ? ' on' : ''), onClick: async () => { S.view = 'settings'; S.share = null; S.settings = await invoke('settings_get'); render(); } }, icon('gear', 17), 'Settings'),
+    h('button', { class: 'nav' + (S.view === 'settings' ? ' on' : ''), onClick: async () => { S.view = 'settings'; S.share = null; S.settings = await invoke('settings_get'); S.version = await invoke('version_info'); render(); } },
+      icon('gear', 17), 'Settings', S.version?.behind > 0 && h('span', { class: 'count update-dot', title: 'Update available' }, 'Update')),
     h('div', { class: 'section-row' }, h('div', { class: 'section' }, 'Vaults'),
       h('button', { class: 'add', 'aria-label': 'New vault', title: 'New vault', onClick: () => { S.sheet = { kind: 'vault-new' }; render(); } }, icon('plus', 14))),
     S.vaults.map((v) => h('div', { class: 'vrow' },
@@ -576,6 +577,8 @@ function settingsView() {
         h('span', { class: 'grow muted' }, 'Replace this vault with a backup. Your current vault is kept aside, not deleted.'),
         h('button', { class: 'btn sm', onClick: () => { S.sheet = { kind: 'restore' }; render(); } }, 'Restore…'))),
 
+    h('div', { class: 'sec' }, h('h2', {}, 'About'), ...aboutSection()),
+
     h('div', { class: 'sec' }, h('h2', {}, 'How your data is protected'),
       h('div', { class: 'faq' },
         h('div', {}, h('b', {}, 'Where is it?'), 'In one encrypted file on this Mac, plus the backups above. Nothing is sent anywhere else.'),
@@ -638,6 +641,29 @@ function shareSetup(K, onDone) {
 async function openHistory(id) {
   S.sheet = { kind: 'history', id, dates: await invoke('history_list', { id }), shown: {} };
   render();
+}
+
+function aboutSection() {
+  const v = S.version;
+  if (!v) return [];
+  const cmd = `cd ${v.repoDir} && git pull && ./scripts/install.sh`;
+  const status = v.behind == null ? (v.updateCheck ? 'Not checked yet' : 'Update checks are off')
+    : v.behind === 0 ? `Up to date with main · checked ${ago(v.lastCheck)}`
+    : `${v.behind} newer change${v.behind === 1 ? '' : 's'} on main`;
+  const check = h('button', { class: 'btn sm', onClick: async () => {
+    check.disabled = true; check.textContent = 'Checking…';
+    try { await invoke('check_update'); } catch (e) { toast(String(e), null); }
+    S.version = await invoke('version_info'); render();
+  } }, 'Check now');
+  return [
+    h('div', { class: 'sec-row' }, h('span', { class: 'grow' }, h('span', { class: 'mono' }, `lockbox ${v.version} · ${v.commit || 'unknown'}${v.dirty ? '+local changes' : ''}`), h('span', { class: 'faint' }, `  built from ${v.date || '?'}`)), check),
+    h('p', { class: v.behind > 0 ? 'warn-text' : 'faint' }, status),
+    v.behind > 0 && h('div', { class: 'sec-row' }, h('span', { class: 'grow path' }, cmd),
+      h('button', { class: 'btn sm', onClick: async () => { await navigator.clipboard?.writeText(cmd).catch(() => invoke('copy_text', { text: cmd })); toast('Command copied', 'paste it in Terminal'); } }, icon('copy'), 'Copy')),
+    v.behind > 0 && h('p', { class: 'faint' }, 'Run it in Terminal: it builds the new version, replaces this app and the lockbox command, and reopens lockbox. Then click ↻ on the browser extension.'),
+    h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: v.updateCheck, onChange: async (e) => { await invoke('set_update_check', { on: e.target.checked }); S.version = await invoke('version_info'); render(); } }),
+      'Check GitHub for updates once a day (fetches only the public commit list)'),
+  ];
 }
 
 function shareSettings() {

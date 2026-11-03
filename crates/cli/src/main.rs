@@ -20,7 +20,7 @@ type R<T> = Result<T, Box<dyn std::error::Error>>;
 const CLEAR_SECS: u64 = 90;
 
 #[derive(Parser)]
-#[command(name = "lockbox", version, about = "End-to-end encrypted password manager")]
+#[command(name = "lockbox", version = lockbox_platform::version::DESCRIBE, about = "End-to-end encrypted password manager")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -40,6 +40,8 @@ enum Cmd {
     Lock,
     /// Show lock state and paths
     Status,
+    /// Show this build's version and whether main has newer commits
+    Version,
     /// List vaults, or `vaults add <name>`
     Vaults {
         #[command(subcommand)]
@@ -447,6 +449,15 @@ fn run(cmd: Cmd) -> R<()> {
                 agent::call(&p.sock, &Request::Lock)?;
             }
             println!("Locked.");
+        }
+        Cmd::Version => {
+            use lockbox_platform::version;
+            println!("lockbox {}", version::DESCRIBE);
+            match version::check() {
+                Ok(u) if u.behind == 0 => println!("Up to date with main."),
+                Ok(u) => println!("{} newer commit{} on main ({})\nUpdate: cd {} && git pull && ./scripts/install.sh", u.behind, if u.behind == 1 { "" } else { "s" }, u.compare_url, version::REPO_DIR),
+                Err(e) => println!("Couldn't check for updates: {e}"),
+            }
         }
         Cmd::Status => {
             println!("lockbox   {}", p.db.display());

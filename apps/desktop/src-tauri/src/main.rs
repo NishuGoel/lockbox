@@ -9,7 +9,7 @@ use lockbox_core::{ImportSummary, Item, KdfParams, Kind, Lockbox, SecretKey, Vau
 use lockbox_platform::agent::{self, Request};
 use lockbox_platform::backup::{self, Settings};
 use lockbox_platform::share::{Include, Server, SharedLink};
-use lockbox_platform::{mac, native};
+use lockbox_platform::{mac, native, version};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
@@ -711,6 +711,52 @@ async fn share_revoke(s: S<'_>, id: String) -> Res<()> {
     Server::configured(&s.dir).ok_or("Sharing isn't set up yet.")?.revoke(&s.dir, &id)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionInfo {
+    describe: &'static str,
+    version: &'static str,
+    commit: &'static str,
+    date: &'static str,
+    dirty: bool,
+    repo_dir: &'static str,
+    update_check: bool,
+    /// None until a check ran for this build
+    behind: Option<u64>,
+    last_check: u64,
+}
+
+#[tauri::command]
+fn version_info(s: S) -> VersionInfo {
+    let st = s.settings();
+    let fresh = st.update_checked_commit == version::COMMIT;
+    VersionInfo {
+        describe: version::DESCRIBE, version: version::VERSION, commit: version::COMMIT, date: version::COMMIT_DATE,
+        dirty: version::dirty(), repo_dir: version::REPO_DIR, update_check: !st.update_check_off,
+        behind: fresh.then_some(st.update_behind), last_check: if fresh { st.last_update_check } else { 0 },
+    }
+}
+
+fn run_update_check(s: &Shared) -> Res<version::Update> {
+    let u = version::check()?;
+    s.update(|st| {
+        st.last_update_check = backup::now();
+        st.update_behind = u.behind;
+        st.update_checked_commit = version::COMMIT.to_string();
+    })?;
+    Ok(u)
+}
+
+#[tauri::command]
+async fn check_update(s: S<'_>) -> Res<version::Update> {
+    run_update_check(&s)
+}
+
+#[tauri::command]
+fn set_update_check(s: S, on: bool) -> Res<()> {
+    s.update(|st| st.update_check_off = !on).map(drop)
+}
+
 #[tauri::command]
 fn hide_quick(app: AppHandle) {
     if let Some(w) = app.get_webview_window("quick") {
@@ -797,6 +843,11 @@ fn main() {
                     if tick % 60 == 1 && sh.db.exists() && sh.settings().backup_due() {
                         let _ = sh.backup();
                     }
+                    // once a day: is main newer than this build? (public commit list only)
+                    let st = sh.settings();
+                    if tick % 1800 == 30 && !st.update_check_off && (st.update_checked_commit != version::COMMIT || backup::now().saturating_sub(st.last_update_check) > backup::DAY) {
+                        let _ = run_update_check(&sh);
+                    }
                     std::thread::sleep(Duration::from_secs(2));
                 }
             });
@@ -817,7 +868,7 @@ fn main() {
             save_item, delete_item, import_pick, import_run, delete_import_file, settings_get, backup_set, backup_choose_dir, backup_run,
             trash_list, restore_item, purge_item, empty_trash, vault_create, vault_rename, vault_delete,
             history_list, history_reveal, history_copy, history_restore, change_password,
-            share_state, share_setup, share_item, share_revoke,
+            share_state, share_setup, share_item, share_revoke, version_info, check_update, set_update_check,
             recovery_verify, recovery_snooze, reveal_secret_key, export_csv, restore_pick, restore, hide_quick, open_main
         ])
         .build(tauri::generate_context!())

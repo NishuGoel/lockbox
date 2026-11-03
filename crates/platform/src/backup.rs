@@ -29,6 +29,12 @@ pub struct Settings {
     pub share_url: Option<String>,
     /// links you've shared, for revoking (ids and titles only, never keys)
     pub shares: Vec<crate::share::SharedLink>,
+    /// opt-out: the daily "is main newer than this build?" check against GitHub
+    pub update_check_off: bool,
+    pub last_update_check: u64,
+    /// commits main had beyond this build at the last check (for the build that checked)
+    pub update_behind: u64,
+    pub update_checked_commit: String,
 }
 
 impl Settings {
