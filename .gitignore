@@ -4,3 +4,7 @@ dist/
 *.db
 .DS_Store
 apps/desktop/src-tauri/gen/
+
+# local Cloudflare dev state and secrets, anywhere in the repo
+**/.dev.vars
+**/.wrangler/
