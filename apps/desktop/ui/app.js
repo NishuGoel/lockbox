@@ -581,7 +581,7 @@ function settingsView() {
 
     h('div', { class: 'sec' }, h('h2', {}, 'How your data is protected'),
       h('div', { class: 'faq' },
-        h('div', {}, h('b', {}, 'Where is it?'), 'In one encrypted file on this Mac, plus the backups above. Nothing is sent anywhere else.'),
+        h('div', {}, h('b', {}, 'Where is it?'), 'In one encrypted file on this Mac, plus the backups above. lockbox only goes online for share links you create and the update check, and neither sends vault data.'),
         h('div', {}, h('b', {}, 'If this Mac is stolen'), 'The file can’t be opened without your master password and Secret Key. lockbox locks when the screen locks.'),
         h('div', {}, h('b', {}, 'If a backup leaks'), 'Useless without the Secret Key, even with a weak master password. That’s what cracked LastPass vaults lacked.'),
         h('div', {}, h('b', {}, 'If you forget the master password'), 'Your data is gone for good. That’s the price of nobody else being able to get in. Keep your Emergency Kit safe.')))));
@@ -656,7 +656,7 @@ function aboutSection() {
     S.version = await invoke('version_info'); render();
   } }, 'Check now');
   return [
-    h('div', { class: 'sec-row' }, h('span', { class: 'grow' }, h('span', { class: 'mono' }, `lockbox ${v.version} · ${v.commit || 'unknown'}${v.dirty ? '+local changes' : ''}`), h('span', { class: 'faint' }, `  built from ${v.date || '?'}`)), check),
+    h('div', { class: 'sec-row' }, h('span', { class: 'grow' }, h('span', { class: 'mono' }, `lockbox ${v.version} · ${v.commit || 'unknown'}${v.dirty ? '+local changes' : ''}`), h('span', { class: 'faint' }, `  · ${v.date || '?'}`)), check),
     h('p', { class: v.behind > 0 ? 'warn-text' : 'faint' }, status),
     v.behind > 0 && h('div', { class: 'sec-row' }, h('span', { class: 'grow path' }, cmd),
       h('button', { class: 'btn sm', onClick: async () => { await navigator.clipboard?.writeText(cmd).catch(() => invoke('copy_text', { text: cmd })); toast('Command copied', 'paste it in Terminal'); } }, icon('copy'), 'Copy')),
