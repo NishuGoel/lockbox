@@ -65,6 +65,36 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const otp = await sw.evaluate(async () => { const tab = await activeTab(); const m = await native({ cmd: 'match', url: tab.url }); return fillItem(tab, m.items[0]); });
   ok(otp === 'totp' && /^\d{6}$/.test(await page.inputValue('#code')), 'fills the 2FA code on a code page');
 
+  // 6b. "Not now" is remembered: the same new login doesn't ask again
+  await login('snooze@example.com', 'snooze-pass-1');
+  ok(await banner(), 'offer for a login lockbox does not have');
+  await page.keyboard.press('Tab'); await page.keyboard.press('Enter'); await sleep(500); // "Not now"
+  await login('snooze@example.com', 'snooze-pass-1');
+  ok(!(await banner()), '"Not now" is remembered: no prompt on the next login');
+
+  // 6c. same login on another domain of the same service → "Add this site", then recognised
+  const loginAt = async (origin, email, pw) => {
+    await page.goto(origin + '/login.html');
+    await page.fill('#email', email); await page.fill('#pw', pw);
+    await page.click('#go'); await page.waitForURL('**/welcome.html');
+  };
+  await loginAt('http://localhost:8766', 'me@example.com', 'n3w-pass-2');
+  ok(await banner(), 'login saved under another domain gets an offer');
+  await page.keyboard.press('Enter'); await sleep(1200); // "Add this site"
+  const urls = JSON.parse(LB('get', '127.0.0.1', '-f', 'json')).urls;
+  ok(urls.some((u) => u.includes('localhost')) && LB('ls').split('\n').filter((l) => l.includes('me@example.com')).length === 1, 'site added to the existing item, no duplicate');
+  await loginAt('http://localhost:8766', 'me@example.com', 'n3w-pass-2');
+  ok(!(await banner()), 'and that domain is recognised from now on');
+
+  // 6d. while lockbox is locked: no banner; after unlocking, the next page load offers it
+  LB('lock');
+  await login('locked@example.com', 'locked-pass-1');
+  ok(!(await banner()), 'no banner while lockbox is locked');
+  execFileSync('expect', [path.join(__dirname, 'unlock.exp')], { stdio: 'ignore', env: { ...process.env, LOCKBOX_DIR: '/tmp/lbx', LB_BIN: ROOT + '/target/release/lockbox' } });
+  await page.reload();
+  ok(await banner(), 'after unlocking, the held login is offered');
+  await page.keyboard.press('Tab'); await page.keyboard.press('Enter'); await sleep(300);
+
   // 7. "Never for this site" (reached by keyboard: the banner is a closed shadow root)
   await login('other@example.com', 'another-1');
   ok(await banner(), 'offer for a second account');

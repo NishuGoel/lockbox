@@ -156,24 +156,24 @@
 
   function showOffer(offer) {
     if (window.top !== window) return;
-    const changed = offer.status === 'changed';
     const decide = async (action) => {
       const r = await chrome.runtime.sendMessage({ type: 'decide', action });
-      if (r?.error === 'locked') return p.say('lockbox is locked. Unlock it, then press Save again.');
+      if (r?.error === 'locked') return p.say('lockbox is locked. Unlock it, then try again.');
       if (r?.error) return p.say(r.error === 'expired' ? 'This offer expired.' : r.error);
-      if (action === 'save') p.done(r.result.action === 'updated' ? 'Password updated. The old one is kept in history.' : `Saved to ${r.result.vault || 'lockbox'}.`);
+      const a = r.result?.action;
+      if (a === 'site_added') p.done(`Added ${offer.host} to ${r.result.title}. lockbox fills it here now.`);
+      else if (a === 'updated') p.done('Password updated. The old one is kept in history.');
+      else if (a === 'added') p.done(`Saved to ${r.result.vault || 'lockbox'}.`);
       else p.close();
     };
-    const p = panel({
-      title: changed ? 'Update password in lockbox?' : 'Save to lockbox?',
-      sub: [offer.title, offer.username].filter(Boolean).join(' · '),
-      message: offer.status === 'locked' ? 'lockbox is locked. Unlock it, then press Save.' : '',
-      buttons: [
-        { label: changed ? 'Update' : 'Save', kind: 'p', onClick: () => decide('save') },
-        { label: 'Not now', onClick: () => decide('dismiss') },
-        { label: 'Never for this site', kind: 'l', onClick: () => decide('never') },
-      ],
-    });
+    const who = [offer.host, offer.username].filter(Boolean).join(' · ');
+    const later = { label: 'Not now', onClick: () => decide('dismiss') };
+    const p = offer.status === 'add_site'
+      ? panel({ title: `Already saved as ${offer.title}`, sub: who, message: '',
+          buttons: [{ label: 'Add this site', kind: 'p', onClick: () => decide('save') }, { label: 'Save as new', onClick: () => decide('save_new') }, later] })
+      : panel({ title: offer.status === 'changed' ? 'Update password in lockbox?' : 'Save to lockbox?', sub: offer.status === 'changed' ? [offer.title, offer.username].filter(Boolean).join(' · ') : who,
+          buttons: [{ label: offer.status === 'changed' ? 'Update' : 'Save', kind: 'p', onClick: () => decide('save') }, later,
+            { label: 'Never for this site', kind: 'l', onClick: () => decide('never') }] });
   }
 
   // ---------- passkeys: bridge from webauthn.js (page world) ----------
