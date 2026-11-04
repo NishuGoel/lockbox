@@ -16,7 +16,10 @@ use crate::agent::{self, Request, Response};
 pub const HOST_NAME: &str = "dev.lockbox.connector";
 /// Extensions allowed to talk to lockbox: the unpacked build (ID fixed by the public `key` in
 /// apps/extension/manifest.json) and, once listed, the Chrome Web Store item.
-pub const EXTENSION_IDS: &[&str] = &["ndlmdmhhecdngfpeehboklmiehkgbnpe"];
+pub const EXTENSION_IDS: &[&str] = &[
+    "ndlmdmhhecdngfpeehboklmiehkgbnpe", // unpacked (apps/extension)
+    "lencdcfilmodpkadjbejngcfkfpacdhc", // Chrome Web Store
+];
 
 pub fn is_extension_origin(arg: &str) -> bool {
     arg.starts_with("chrome-extension://")
