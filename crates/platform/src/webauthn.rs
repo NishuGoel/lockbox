@@ -48,9 +48,10 @@ pub fn origin_of(page_url: &str) -> Option<String> {
 pub fn rp_id_ok(rp_id: &str, page_url: &str) -> bool {
     let Some((scheme, host, _)) = parts(page_url) else { return false };
     let rp = rp_id.to_lowercase();
-    let local = host == "localhost";
+    // browsers treat localhost and *.localhost as secure (they can only ever be this machine)
+    let local = host == "localhost" || host.ends_with(".localhost");
     let secure = scheme == "https" || (scheme == "http" && local);
-    secure && (rp.contains('.') || (local && rp == "localhost")) && (host == rp || host.ends_with(&format!(".{rp}")))
+    secure && (rp.contains('.') || (host == "localhost" && rp == "localhost")) && (host == rp || host.ends_with(&format!(".{rp}")))
 }
 
 // ---- minimal CBOR (only the shapes WebAuthn needs) ----
@@ -184,6 +185,9 @@ mod tests {
         assert!(rp_id_ok("github.com", "https://github.com/login"));
         assert!(rp_id_ok("example.com", "https://login.example.com/"));
         assert!(rp_id_ok("localhost", "http://localhost:8766/x"));
+        assert!(rp_id_ok("northwind.localhost", "http://northwind.localhost:8767/"));
+        assert!(!rp_id_ok("localhost", "http://northwind.localhost/"), "a *.localhost page can't claim bare localhost");
+        assert!(!rp_id_ok("evil.localhost.example.com", "http://evil.localhost.example.com/"), "only real *.localhost gets http");
         assert!(!rp_id_ok("github.com", "https://github.com.evil.io/"), "not a parent domain");
         assert!(!rp_id_ok("login.example.com", "https://example.com/"), "can't claim a child domain");
         assert!(!rp_id_ok("example.com", "http://example.com/"), "https only");
