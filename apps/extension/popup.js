@@ -62,7 +62,8 @@ async function init() {
     if (r.error) return note(r.error);
     note(r.filled ? 'Strong password filled. Submit the form and lockbox will offer to save it.' : 'No password field here. Open the sign-up or change-password form first.');
   } }, 'Generate password');
-  main.replaceChildren(search, secTitle, results, h('footer', {}, gen, h('span', { class: 'faint' }, h('span', { class: 'kbd' }, '⌘⇧L'), ' fills without opening this')));
+  main.replaceChildren(search, secTitle, results, h('footer', {}, gen, h('span', { class: 'faint' }, h('span', { class: 'kbd' }, '⌘⇧L'), ' fills without opening this')),
+    h('p', { class: 'faint pad version' }, 'extension ' + chrome.runtime.getManifest().version));
   (results.querySelector('.row') || search).focus();
 }
 

@@ -238,3 +238,4 @@ body.quick #root::before{display:none}
 .inc{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .inc label{display:flex;align-items:center;gap:8px}
 .inc input{width:16px;height:16px;accent-color:var(--accent)}
+.update-dot{color:var(--accent);font-weight:600}

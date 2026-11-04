@@ -26,7 +26,8 @@ open ../../../target/release/bundle/macos/lockbox.app
 3. Pin the lockbox icon.
 
 - **Saving:** log in anywhere as usual and lockbox offers **Save** / **Update password** (the old password goes to history). "Never for this site" silences a site.
-- **Filling:** **⌘⇧L** fills the login for the page you're on (on a 2FA page it fills the code), or click the icon to choose.
+- **Filling:** click into a login field and lockbox suggests this site's logins right there (↓ ↵ or click). On a 2FA field it offers the code, on a sign-up form a strong password. **⌘⇧L** or the toolbar icon work too.
+- **Clickjacking-hardened:** the in-field menu only reacts to real clicks, ignores clicks in its first 300 ms, and refuses if the page has hidden, faded, clipped or covered it; frames only ever see their own site's logins.
 - **Anti-phishing:** a login only fills on its own site or its subdomains, never on a lookalike, and never on an http downgrade.
 - **Passkeys:** when a site offers to create a passkey, lockbox asks **Save passkey in lockbox?** and keeps it in your vault (and backups). Signing in shows your accounts for that site. **Other options** hands the request to the browser (iCloud Keychain, phone, security key). Keys never reach the page; the site is taken from the browser, not the page.
 - Works while lockbox is unlocked (the app or `lockbox unlock`).
@@ -58,6 +59,14 @@ lockbox share <item> [--views 1] [--expires 1d] [--passphrase]   # needs server/
 lockbox shares [revoke <id>]
 lockbox lock
 ```
+
+## Updating
+
+```sh
+cd ~/projects/lockbox && git pull && ./scripts/install.sh   # builds, replaces the app, installs the CLI
+```
+
+`lockbox --version` / Settings → About show the exact build; the app checks once a day whether `main` is newer.
 
 ## Layout
 

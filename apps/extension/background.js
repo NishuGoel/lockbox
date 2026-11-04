@@ -169,6 +169,17 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         const d = msg.data;
         return reply(await native({ cmd: 'pk_get', url: sender.url, id: d.id, rpId: d.rpId, challenge: d.challenge }));
       }
+      // ---- inline suggestions (from content scripts; sender.url is the frame's own URL) ----
+      case 'suggest': {
+        // no caching: right after you lock, the next focus must already see "locked"
+        const m = await native({ cmd: 'match', url: sender.url });
+        return reply(m.items ? { state: 'unlocked', items: m.items } : { state: m.error === 'locked' || m.error === 'no_vault' ? m.error : 'unavailable', items: [] });
+      }
+      case 'suggest-fill': {
+        // only ever for the asking frame's own site; the app re-checks with site_matches
+        return reply(await native({ cmd: 'fill', id: msg.id, url: sender.url }));
+      }
+      case 'suggest-generate': return reply(await native({ cmd: 'generate', length: 20 }));
       // ---- from the popup ----
       case 'popup': {
         const tab = await activeTab();
