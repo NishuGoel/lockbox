@@ -1,0 +1,12 @@
+body{margin:0;min-height:100vh;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;background:linear-gradient(160deg,#eef2ff,#f8fafc 55%);color:#0f172a;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:10px;padding:22px 40px;font-weight:700;font-size:18px}
+header i{width:30px;height:30px;border-radius:9px;background:#4f46e5;display:inline-block}
+main{flex:1;display:flex;align-items:flex-start;justify-content:center;padding-top:70px}
+.card{width:380px;background:#fff;border-radius:18px;padding:32px;box-shadow:0 20px 50px rgba(15,23,42,.12)}
+h1{margin:0 0 6px;font-size:24px}p{margin:0 0 22px;color:#64748b}
+label{display:block;font-size:13px;font-weight:600;margin:14px 0 6px}
+input{box-sizing:border-box;width:100%;height:44px;padding:0 12px;border:1px solid #cbd5e1;border-radius:10px;font:inherit}
+input:focus{outline:2px solid #6366f1;border-color:transparent}
+button{margin-top:22px;width:100%;height:46px;border:0;border-radius:10px;background:#4f46e5;color:#fff;font:600 15px inherit;cursor:pointer}
+button.ghost{background:#eef2ff;color:#3730a3;margin-top:10px}
+.ok{font-size:40px;margin-bottom:8px}

@@ -244,7 +244,7 @@
     :host{all:initial;position:fixed;z-index:2147483647}
     .icon{width:22px;height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;background:rgba(18,21,28,.92);color:#5EEAD4;cursor:pointer;border:1px solid rgba(255,255,255,.14)}
     .icon.locked{color:#9BA3B4}
-    .menu{box-sizing:border-box;min-width:280px;max-width:420px;padding:6px;border-radius:14px;background:rgba(18,21,28,.97);border:1px solid rgba(255,255,255,.12);
+    .menu{box-sizing:border-box;min-width:280px;max-width:420px;padding:6px;border-radius:14px;background:#12151C;border:1px solid rgba(255,255,255,.12);
           box-shadow:0 18px 48px rgba(0,0,0,.45);color:#ECEEF3;font:14px/1.4 -apple-system,BlinkMacSystemFont,system-ui,sans-serif}
     .row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;cursor:pointer}
     .row.on,.row:hover{background:rgba(255,255,255,.08)}

@@ -14,8 +14,9 @@ use uuid::Uuid;
 use crate::agent::{self, Request, Response};
 
 pub const HOST_NAME: &str = "dev.lockbox.connector";
-/// Fixed by the public `key` in apps/extension/manifest.json.
-pub const EXTENSION_ID: &str = "ndlmdmhhecdngfpeehboklmiehkgbnpe";
+/// Extensions allowed to talk to lockbox: the unpacked build (ID fixed by the public `key` in
+/// apps/extension/manifest.json) and, once listed, the Chrome Web Store item.
+pub const EXTENSION_IDS: &[&str] = &["ndlmdmhhecdngfpeehboklmiehkgbnpe"];
 
 pub fn is_extension_origin(arg: &str) -> bool {
     arg.starts_with("chrome-extension://")
@@ -29,7 +30,7 @@ pub fn install_manifests(exe: &Path) -> Vec<PathBuf> {
         "description": "lockbox password manager",
         "path": exe,
         "type": "stdio",
-        "allowed_origins": [format!("chrome-extension://{EXTENSION_ID}/")],
+        "allowed_origins": EXTENSION_IDS.iter().map(|id| format!("chrome-extension://{id}/")).collect::<Vec<_>>(),
     });
     let mut written = Vec::new();
     for profile in ["Google/Chrome", "Dia/User Data"] {
@@ -68,7 +69,7 @@ fn write_msg(w: &mut impl Write, v: &Value) -> std::io::Result<()> {
 /// The connector loop. Chrome checks `allowed_origins` too; this is the second lock on the door.
 pub fn run(origin: &str, db: &Path, sock: &Path) {
     let (mut stdin, mut stdout) = (std::io::stdin().lock(), std::io::stdout().lock());
-    if origin != format!("chrome-extension://{EXTENSION_ID}/") {
+    if !EXTENSION_IDS.iter().any(|id| origin == format!("chrome-extension://{id}/")) {
         let _ = write_msg(&mut stdout, &json!({ "error": "unknown extension" }));
         return;
     }
