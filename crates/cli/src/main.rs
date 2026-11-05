@@ -101,6 +101,20 @@ enum Cmd {
     Mv { query: String, vault: String },
     /// Change your master password
     Passwd,
+    /// Run a command with secrets from lockbox:// references. You approve in the lockbox app;
+    /// values go only into this command's environment and are concealed in its output.
+    Run {
+        /// .env file(s): lockbox:// values are resolved, other lines pass through unchanged
+        #[arg(long = "env-file")]
+        env_file: Vec<PathBuf>,
+        /// show secrets in the command's output instead of concealing them
+        #[arg(long)]
+        no_masking: bool,
+        #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Print the lockbox:// references of matching items (names only, never values)
+    Ref { query: String },
     /// Make a link that shares one item and stops working after N views or a time limit
     Share {
         query: String,
@@ -565,6 +579,10 @@ fn run(cmd: Cmd) -> R<()> {
                 }
             }
         }
+        Cmd::Run { env_file, no_masking, command } => {
+            let code = run_with_secrets(&p, &env_file, no_masking, &command)?;
+            std::process::exit(code);
+        }
         Cmd::Passwd => {
             if agent::is_running(&p.sock) {
                 agent::call(&p.sock, &Request::Lock)?;
@@ -622,6 +640,25 @@ fn run(cmd: Cmd) -> R<()> {
                     println!("{link}");
                     eprintln!("Anyone with this link can open {} {} within {expires}{}.", r.item.title, if unlimited { "any number of times".into() } else { format!("{views} time{}", if views == 1 { "" } else { "s" }) },
                         if passphrase { " (with the passphrase; send it separately)" } else { "" });
+                }
+                Cmd::Ref { query } => {
+                    let vaults: Vec<Vault> = s.call(Request::Vaults)?;
+                    let allowed = Settings::load(&lockbox_platform::data_dir()?).agent_vaults;
+                    let mut found = 0;
+                    for r in s.items()?.iter().filter(|r| r.item.matches(&query)) {
+                        if allowed.as_ref().is_some_and(|ids| !ids.contains(&r.vault_id)) {
+                            continue;
+                        }
+                        let vault = vaults.iter().find(|v| v.id == r.vault_id).map_or("?", |v| v.name.as_str());
+                        println!("{}  ({vault})", r.item.title);
+                        for reference in lockbox_core::reference::references_for(r, vault) {
+                            println!("  {reference}");
+                        }
+                        found += 1;
+                    }
+                    if found == 0 {
+                        return Err(format!("nothing matches '{query}'").into());
+                    }
                 }
                 Cmd::Trash => {
                     let items: Vec<ItemRecord> = s.call(Request::Trash)?;
@@ -717,6 +754,131 @@ fn run(cmd: Cmd) -> R<()> {
     Ok(())
 }
 
+/// KEY=VALUE lines; `export`, quotes and comments are understood, nothing is interpolated.
+fn parse_env_file(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let (k, v) = l.strip_prefix("export ").unwrap_or(l).split_once('=')?;
+            let v = v.trim();
+            let v = v.strip_prefix('"').and_then(|x| x.strip_suffix('"')).or_else(|| v.strip_prefix('\'').and_then(|x| x.strip_suffix('\''))).unwrap_or(v);
+            Some((k.trim().to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+/// Replaces every secret in a chunk of output with a marker.
+fn mask(chunk: &[u8], secrets: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = chunk.to_vec();
+    for s in secrets {
+        let mut i = 0;
+        let mut next = Vec::with_capacity(out.len());
+        while i < out.len() {
+            if out[i..].starts_with(s) {
+                next.extend_from_slice("‹concealed by lockbox›".as_bytes());
+                i += s.len();
+            } else {
+                next.push(out[i]);
+                i += 1;
+            }
+        }
+        out = next;
+    }
+    out
+}
+
+fn run_with_secrets(p: &Paths, env_files: &[PathBuf], no_masking: bool, command: &[String]) -> R<i32> {
+    use lockbox_core::reference::SCHEME;
+    use std::io::Read;
+    let mut env: Vec<(String, String)> = Vec::new();
+    for f in env_files {
+        env.extend(parse_env_file(&std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?));
+    }
+    env.extend(std::env::vars().filter(|(_, v)| v.starts_with(SCHEME)));
+    let mut refs: Vec<String> = env.iter().filter(|(_, v)| v.starts_with(SCHEME)).map(|(_, v)| v.clone()).collect();
+    refs.sort();
+    refs.dedup();
+
+    let mut values: Vec<(String, Zeroizing<String>)> = Vec::new();
+    if !refs.is_empty() {
+        if !agent::is_running(&p.sock) {
+            return Err("Open lockbox and unlock it: the app asks you before any secret is used.".into());
+        }
+        let agent_name = if std::env::var_os("CLAUDECODE").is_some() { "Claude Code" } else { "Terminal" };
+        let shown = command.iter().map(|a| if a.contains(' ') { format!("{a:?}") } else { a.clone() }).collect::<Vec<_>>().join(" ");
+        let cwd = std::env::current_dir()?.display().to_string();
+        let ask = Request::AgentAsk { agent: agent_name.into(), command: shown, cwd, refs: refs.clone() };
+        let started = std::time::Instant::now();
+        let mut said = false;
+        let approval: serde_json::Value = loop {
+            match agent::call(&p.sock, &ask) {
+                Ok(v) => break v,
+                Err(e) if e == "locked" && started.elapsed().as_secs() < 120 => {
+                    if !said {
+                        eprintln!("lockbox is locked. Unlock it in the app to continue…");
+                        said = true;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+        let id = approval["id"].as_str().unwrap_or_default().to_string();
+        if approval["status"] == "pending" {
+            let labels: Vec<&str> = approval["labels"].as_array().map(|a| a.iter().filter_map(|l| l.as_str()).collect()).unwrap_or_default();
+            eprintln!("lockbox: approve in the lockbox app to use {}…", labels.join(", "));
+            loop {
+                std::thread::sleep(Duration::from_millis(400));
+                match agent::call(&p.sock, &Request::AgentStatus { id: id.clone() })?.as_str() {
+                    Some("approved") => break,
+                    Some("pending") => continue,
+                    Some("denied") => return Err("denied in lockbox".into()),
+                    Some(other) => return Err(format!("request {other}").into()),
+                    None => return Err("lost the approval request".into()),
+                }
+            }
+        }
+        let resolved: Vec<(String, String)> = serde_json::from_value(agent::call(&p.sock, &Request::AgentResolve { id })?)?;
+        values = resolved.into_iter().map(|(r, v)| (r, Zeroizing::new(v))).collect();
+    }
+
+    let lookup = |v: &str| values.iter().find(|(r, _)| r == v).map(|(_, s)| s.to_string());
+    let mut child = Command::new(&command[0]);
+    child.args(&command[1..]);
+    for (k, v) in &env {
+        child.env(k, if v.starts_with(SCHEME) { lookup(v).unwrap_or_default() } else { v.clone() });
+    }
+    if no_masking || values.is_empty() {
+        return Ok(child.status().map_err(|e| format!("{}: {e}", command[0]))?.code().unwrap_or(1));
+    }
+    let secrets: Vec<Vec<u8>> = values.iter().map(|(_, s)| s.as_bytes().to_vec()).filter(|s| s.len() >= 4).collect();
+    let mut proc = child.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{}: {e}", command[0]))?;
+    // ponytail: masks per read chunk; a secret split exactly across two chunks could slip through,
+    // so lines are reassembled first. Ceiling: a single line longer than 64 KiB.
+    let pump = |mut from: Box<dyn Read + Send>, to_err: bool, secrets: Vec<Vec<u8>>| {
+        std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::with_capacity(64 * 1024, &mut from);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match std::io::BufRead::read_until(&mut reader, b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let masked = mask(&line, &secrets);
+                        let _ = if to_err { std::io::stderr().write_all(&masked) } else { std::io::stdout().write_all(&masked) };
+                    }
+                }
+            }
+        })
+    };
+    let a = pump(Box::new(proc.stdout.take().unwrap()), false, secrets.clone());
+    let b = pump(Box::new(proc.stderr.take().unwrap()), true, secrets);
+    let status = proc.wait()?;
+    let _ = (a.join(), b.join());
+    Ok(status.code().unwrap_or(1))
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse().cmd) {
         Ok(()) => ExitCode::SUCCESS,
@@ -749,6 +911,18 @@ mod tests {
         assert_eq!(resolve(&items, "enterprise").unwrap().item.title, "GitHub Enterprise");
         assert!(resolve(&items, "g").unwrap_err().contains("matches 3 items"));
         assert!(resolve(&items, "nope").is_err());
+    }
+
+    #[test]
+    fn env_files_and_masking() {
+        let env = parse_env_file("# comment\nexport AWS_KEY=\"lockbox://Work/AWS Console/password\"\nREGION=eu-central-1\n\nTOKEN='lockbox://Work/GitHub/token'\nbroken line\n");
+        assert_eq!(env, vec![
+            ("AWS_KEY".into(), "lockbox://Work/AWS Console/password".into()),
+            ("REGION".into(), "eu-central-1".into()),
+            ("TOKEN".into(), "lockbox://Work/GitHub/token".into()),
+        ]);
+        let out = mask(b"key=aws-secret-123 again aws-secret-123\n", &[b"aws-secret-123".to_vec()]);
+        assert_eq!(String::from_utf8(out).unwrap(), "key=‹concealed by lockbox› again ‹concealed by lockbox›\n");
     }
 
     #[test]

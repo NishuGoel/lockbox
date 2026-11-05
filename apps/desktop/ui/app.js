@@ -16,6 +16,7 @@ async function boot() {
 
 async function load() {
   [S.items, S.vaults, S.settings, S.trash, S.version] = await Promise.all([invoke('items'), invoke('vaults'), invoke('settings_get'), invoke('trash_list'), invoke('version_info')]);
+  if (S.screen === 'app') setTimeout(showAgentApprovals);
   if (!S.nudged) {
     // one gentle prompt per unlock: backups first, then the monthly Emergency Kit check
     S.nudged = true;
@@ -577,6 +578,8 @@ function settingsView() {
         h('span', { class: 'grow muted' }, 'Replace this vault with a backup. Your current vault is kept aside, not deleted.'),
         h('button', { class: 'btn sm', onClick: () => { S.sheet = { kind: 'restore' }; render(); } }, 'Restore…'))),
 
+    h('div', { class: 'sec' }, h('h2', {}, 'Agents'), ...agentSection()),
+
     h('div', { class: 'sec' }, h('h2', {}, 'About'), ...aboutSection()),
 
     h('div', { class: 'sec' }, h('h2', {}, 'How your data is protected'),
@@ -641,6 +644,38 @@ function shareSetup(K, onDone) {
 async function openHistory(id) {
   S.sheet = { kind: 'history', id, dates: await invoke('history_list', { id }), shown: {} };
   render();
+}
+
+async function showAgentApprovals() {
+  const list = await invoke('agent_pending').catch(() => []);
+  if (!list.length) { if (S.sheet?.kind === 'agent') closeSheet(); return; }
+  S.sheet = { kind: 'agent', list };
+  render();
+}
+
+function agentSection() {
+  const a = S.agentSettings;
+  if (!a) { invoke('agent_settings').then((r) => { S.agentSettings = r; render(); }); return [h('p', { class: 'faint' }, 'Loading…')]; }
+  const all = a.vaults == null;
+  const setVaults = async (v) => { await invoke('agent_set_vaults', { vaults: v }); S.agentSettings = await invoke('agent_settings'); render(); };
+  const vaultBoxes = S.vaults.map((v) => {
+    const on = all || a.vaults.includes(v.id);
+    return h('label', {}, h('input', { type: 'checkbox', checked: on, disabled: all, onChange: (e) => setVaults(e.target.checked ? [...a.vaults, v.id] : a.vaults.filter((x) => x !== v.id)) }), v.name);
+  });
+  return [
+    h('p', { class: 'muted' }, 'Claude Code and your scripts can use secrets through lockbox:// references. You approve every use here, and the values only go into the approved command; the agent never sees them.'),
+    h('div', { class: 'path' }, 'lockbox ref aws          # references for an item'),
+    h('div', { class: 'path' }, 'lockbox run -- npm run deploy   # with lockbox:// values in the environment or --env-file .env'),
+    h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: all, onChange: (e) => setVaults(e.target.checked ? null : S.vaults.map((v) => v.id)) }), 'Agents may ask for items in any vault'),
+    !all && h('div', { class: 'inc' }, vaultBoxes),
+    h('div', { class: 'sec-row' }, h('span', { class: 'grow faint' }, 'Revoking ends every “Allow for 1 hour” and refuses anything still waiting.'),
+      h('button', { class: 'btn sm', onClick: async () => { await invoke('agent_revoke_all'); toast('Agent access revoked', null); } }, 'Revoke all')),
+    h('span', { class: 'label' }, 'Recent activity'),
+    a.log.length
+      ? h('div', { class: 'trows' }, a.log.slice(0, 10).map((l) => h('div', { class: 'trow' },
+          h('div', { class: 'grow' }, h('span', {}, `${l.agent}: ${l.command}`), h('span', { class: 'faint' }, `${l.labels.join(', ')} · ${l.outcome} · ${ago(l.at)}`)))))
+      : h('p', { class: 'faint' }, 'No agent has asked for anything yet.'),
+  ];
 }
 
 function aboutSection() {
@@ -816,6 +851,25 @@ function sheet() {
         h('div', { class: 'field' }, h('label', { for: 'sh-pp' }, 'Passphrase'), pp),
         err, h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), btn)];
     }
+  } else if (K.kind === 'agent') {
+    const a = K.list[0];
+    const decide = async (decision) => {
+      try { await invoke('agent_decide', { id: a.id, decision }); } catch (e) { toast(String(e), null); }
+      S.agentSettings = null;
+      toast(decision === 'deny' ? 'Denied' : decision === 'hour' ? 'Allowed for 1 hour' : 'Allowed once', `${a.agent} · ${a.command}`);
+      await showAgentApprovals();
+    };
+    body = [h('h2', {}, `${a.agent} wants to use ${a.labels.length === 1 ? 'a secret' : `${a.labels.length} secrets`}`),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'To run'), h('div', { class: 'link-box' }, a.command)),
+      h('p', { class: 'faint' }, 'in ' + a.cwd),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Using'), h('div', { class: 'trows' }, a.labels.map((l) => h('div', { class: 'trow' }, icon('key'), h('span', { class: 'grow' }, l))))),
+      h('p', { class: 'muted' }, `The values go only into this command's environment and are hidden from its output. ${a.agent} never sees them.`),
+      K.list.length > 1 && h('p', { class: 'faint' }, `${K.list.length - 1} more request${K.list.length > 2 ? 's' : ''} waiting`),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn', onClick: () => decide('deny') }, 'Deny'),
+        h('button', { class: 'btn', onClick: () => decide('hour') }, 'Allow for 1 hour'),
+        h('button', { class: 'btn primary', id: 'agent-once', onClick: () => decide('once') }, 'Allow once'))];
+    focusAfter = 'agent-once';
   } else if (K.kind === 'passwd') {
     const say = (m) => { err.textContent = String(m); };
     const cur = pwField('pw-cur', () => nw.focus());
@@ -853,7 +907,7 @@ function sheet() {
       h('div', { class: 'field' }, h('label', { for: 'rr-pw' }, 'Master password for that backup'), pw), err,
       h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: closeSheet }, 'Cancel'), h('button', { class: 'btn primary', disabled: !K.path, onClick: go }, 'Restore'))];
   }
-  const scrim = h('div', { class: 'scrim', onMousedown: (e) => e.target === scrim && K.kind !== 'reveal' && closeSheet() },
+  const scrim = h('div', { class: 'scrim', onMousedown: (e) => e.target === scrim && K.kind !== 'reveal' && K.kind !== 'agent' && closeSheet() },
     h('div', { class: 'sheet fade', role: 'dialog', 'aria-label': 'lockbox' }, h('div', { class: 'editor' }, ...body)));
   return scrim;
 }
@@ -878,6 +932,8 @@ document.addEventListener('keydown', (e) => {
   }
 });
 document.addEventListener('mousedown', () => { if (Date.now() - lastPing > 15000 && S.screen === 'app') { lastPing = Date.now(); invoke('activity'); } });
+
+listen('agent-approval', () => { if (S.screen === 'app') showAgentApprovals(); });
 
 listen('locked', () => {
   Object.assign(S, { screen: 'unlock', items: [], vaults: [], revealed: {}, palette: null, editor: null, importer: null, sheet: null, nudged: false, needSk: false });

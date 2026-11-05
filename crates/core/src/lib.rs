@@ -1,6 +1,7 @@
 pub mod crypto;
 pub mod generator;
 pub mod import;
+pub mod reference;
 pub mod totp;
 pub mod vault;
 

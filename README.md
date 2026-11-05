@@ -60,6 +60,10 @@ lockbox shares [revoke <id>]
 lockbox lock
 ```
 
+## Agents (Claude Code)
+
+Agents use `lockbox://Vault/Item/field` references instead of secrets: `lockbox ref <search>` lists them, `lockbox run -- <command>` (or `--env-file .env`) asks you in the app and then injects the values into that command only, concealing them in its output. See [docs/agents.md](docs/agents.md), including a CLAUDE.md snippet.
+
 ## Updating
 
 ```sh
