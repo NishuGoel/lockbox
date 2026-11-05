@@ -35,6 +35,9 @@ pub struct Settings {
     /// commits main had beyond this build at the last check (for the build that checked)
     pub update_behind: u64,
     pub update_checked_commit: String,
+    /// vaults agents may use; None = all (each use still needs your approval)
+    pub agent_vaults: Option<Vec<uuid::Uuid>>,
+    pub agent_log: Vec<crate::agents::LogEntry>,
 }
 
 impl Settings {

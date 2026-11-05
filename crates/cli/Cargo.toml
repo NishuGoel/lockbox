@@ -16,3 +16,6 @@ zeroize = "1.9.0"
 [[bin]]
 name = "lockbox"
 path = "src/main.rs"
+
+[dev-dependencies]
+uuid = { version = "1.26.1", features = ["v4"] }

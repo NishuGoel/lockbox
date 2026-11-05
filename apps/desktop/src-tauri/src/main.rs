@@ -9,6 +9,7 @@ use lockbox_core::{ImportSummary, Item, KdfParams, Kind, Lockbox, SecretKey, Vau
 use lockbox_platform::agent::{self, Request};
 use lockbox_platform::backup::{self, Settings};
 use lockbox_platform::share::{Include, Server, SharedLink};
+use lockbox_platform::agents::{Approvals, Decision};
 use lockbox_platform::{mac, native, version};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -40,6 +41,8 @@ struct Shared {
     hosting: AtomicBool,
     /// The export being imported. Its path is the only file `delete_import_file` may remove.
     pending: Mutex<Option<(PathBuf, Option<Parsed>)>>,
+    /// agent access requests waiting for / decided by you
+    approvals: Approvals,
 }
 
 type S<'a> = State<'a, Arc<Shared>>;
@@ -112,6 +115,44 @@ impl Shared {
     }
 }
 
+fn show_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// Agent access requests (from `lockbox run` / the MCP server). Asking brings lockbox to the front
+/// so you can decide; nothing an agent sends can approve anything by itself.
+fn agent_request(app: &AppHandle, sh: &Shared, req: &Request) -> Option<agent::Response> {
+    let r = match req {
+        Request::AgentAsk { agent: who, command, cwd, refs } => {
+            let g = sh.lb.lock().unwrap();
+            let Some(lb) = g.as_ref() else {
+                drop(g);
+                show_main_window(app); // unlock first; the CLI retries
+                return Some(Err("locked".into()));
+            };
+            sh.approvals.ask(lb, who, command, cwd, refs).map(|a| {
+                if a.status == lockbox_platform::agents::Status::Pending {
+                    show_main_window(app);
+                    let _ = app.emit_to("main", "agent-approval", ());
+                }
+                serde_json::json!(a)
+            })
+        }
+        Request::AgentStatus { id } => sh.approvals.status(id).map(|s| serde_json::json!(s)).ok_or_else(|| "unknown request".to_string()),
+        Request::AgentResolve { id } => {
+            let g = sh.lb.lock().unwrap();
+            let lb = g.as_ref()?;
+            sh.approvals.resolve(lb, id).map(|v| serde_json::json!(v))
+        }
+        _ => return None,
+    };
+    Some(r)
+}
+
 /// Serve the CLI's agent socket while unlocked, unless `lockbox unlock` already does.
 fn start_hosting(app: &AppHandle, sh: &Arc<Shared>) {
     if agent::is_running(&sh.sock) || sh.hosting.swap(true, Ordering::SeqCst) {
@@ -125,6 +166,9 @@ fn start_hosting(app: &AppHandle, sh: &Arc<Shared>) {
                 sh.hosting.store(false, Ordering::SeqCst);
                 sh.drop_keys(&app);
                 return Ok(Value::Null);
+            }
+            if let Some(r) = agent_request(&app, &sh, &req) {
+                return r;
             }
             sh.touch();
             match sh.lb.lock().unwrap().as_ref() {
@@ -758,6 +802,40 @@ fn set_update_check(s: S, on: bool) -> Res<()> {
 }
 
 #[tauri::command]
+fn agent_pending(s: S) -> Vec<lockbox_platform::agents::Approval> {
+    s.approvals.pending()
+}
+
+#[tauri::command]
+fn agent_decide(s: S, id: String, decision: Decision) -> Res<()> {
+    s.touch();
+    s.approvals.decide(&id, decision)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentSettings {
+    vaults: Option<Vec<Uuid>>,
+    log: Vec<lockbox_platform::agents::LogEntry>,
+}
+
+#[tauri::command]
+fn agent_settings(s: S) -> AgentSettings {
+    let st = s.settings();
+    AgentSettings { vaults: st.agent_vaults, log: st.agent_log.into_iter().take(50).collect() }
+}
+
+#[tauri::command]
+fn agent_set_vaults(s: S, vaults: Option<Vec<Uuid>>) -> Res<()> {
+    s.update(|st| st.agent_vaults = vaults).map(drop)
+}
+
+#[tauri::command]
+fn agent_revoke_all(s: S) {
+    s.approvals.revoke_all();
+}
+
+#[tauri::command]
 fn hide_quick(app: AppHandle) {
     if let Some(w) = app.get_webview_window("quick") {
         let _ = w.hide();
@@ -813,6 +891,7 @@ fn main() {
         last: AtomicU64::new(now()),
         hosting: AtomicBool::new(false),
         pending: Mutex::new(None),
+        approvals: Approvals::new(dir.clone()),
     });
     let quick = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
 
@@ -869,6 +948,7 @@ fn main() {
             trash_list, restore_item, purge_item, empty_trash, vault_create, vault_rename, vault_delete,
             history_list, history_reveal, history_copy, history_restore, change_password,
             share_state, share_setup, share_item, share_revoke, version_info, check_update, set_update_check,
+            agent_pending, agent_decide, agent_settings, agent_set_vaults, agent_revoke_all,
             recovery_verify, recovery_snooze, reveal_secret_key, export_csv, restore_pick, restore, hide_quick, open_main
         ])
         .build(tauri::generate_context!())

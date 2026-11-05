@@ -30,6 +30,10 @@ pub enum Request {
     Move { id: Uuid, vault: Uuid },
     RenameVault { id: Uuid, name: String },
     DeleteVault { id: Uuid },
+    /// agent access (answered by the desktop app, which can ask you)
+    AgentAsk { agent: String, command: String, cwd: String, refs: Vec<String> },
+    AgentStatus { id: String },
+    AgentResolve { id: String },
     Lock,
 }
 
@@ -50,6 +54,9 @@ pub fn handle(lb: &Lockbox, req: Request) -> Response {
         Request::Move { id, vault } => lb.move_item(&id, &vault).map(|_| Value::Null),
         Request::RenameVault { id, name } => lb.rename_vault(&id, &name).map(|_| Value::Null),
         Request::DeleteVault { id } => lb.delete_vault(&id).map(|_| Value::Null),
+        Request::AgentAsk { .. } | Request::AgentStatus { .. } | Request::AgentResolve { .. } => {
+            return Err("agent access needs the lockbox app, so it can ask you: open lockbox and unlock it".into());
+        }
         Request::Lock => Ok(Value::Null),
     };
     r.map_err(|e| e.to_string())

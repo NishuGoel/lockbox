@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agents;
 pub mod backup;
 pub mod mac;
 pub mod native;
